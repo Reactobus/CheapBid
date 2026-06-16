@@ -1,0 +1,9 @@
+## Interface: 20505
+## Title: CheapBids
+## Notes: Auction tab listing lots with bid 1-99 copper. Manual bidding only.
+## Author: Player
+## Version: 2.0
+## SavedVariables: CheapBidsDB
+
+CheapBids.lua
+Bindings.xml

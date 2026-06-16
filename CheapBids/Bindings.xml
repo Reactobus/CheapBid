@@ -1,0 +1,5 @@
+<Bindings>
+    <Binding name="CHEAPBIDS_BIDTOP" header="CHEAPBIDS" category="ADDONS">
+        CheapBids_KeyBid()
+    </Binding>
+</Bindings>
