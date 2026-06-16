@@ -145,6 +145,18 @@ local function SetProgress(frac)
 end
 local function HideProgress() if progBar then progBar:Hide() end end
 
+-- generic input throttle: returns true = "fired too soon, bail". Guards the heavy
+-- filter/sort handlers from autoclicker / held-key spam the same way BidItem
+-- guards bids. Keyed so different controls don't starve each other.
+local throttleAt = {}
+local function Throttled(key, interval)
+    local now = GetTime and GetTime() or 0
+    if now == 0 then return false end                       -- no clock yet -> don't block
+    if (now - (throttleAt[key] or 0)) < interval then return true end
+    throttleAt[key] = now
+    return false
+end
+
 -- ===== Table =====
 
 local function SortItems()
@@ -220,7 +232,7 @@ local function ApplyFilter()
     ReadFilter()
     cheapItems = {}
     for _, it in ipairs(scanCache) do
-        if not it.done and TimeShown(it.timeLeft) and PassesFilter(it.bid, it.buyout) then cheapItems[#cheapItems + 1] = it end
+        if not it.done and not it.led and TimeShown(it.timeLeft) and PassesFilter(it.bid, it.buyout) then cheapItems[#cheapItems + 1] = it end
     end
     SortItems()
     selectedItem = nil
@@ -229,6 +241,17 @@ local function ApplyFilter()
     UpdateTable()
     statusFS:SetText(string.format("Found %d of %d (%s)", #cheapItems, #scanCache, FilterDesc()))
     C_Timer.After(0.7, function() if uiBuilt and not isScanning then UpdateTable() end end)
+end
+
+-- Throttled entry point for USER-driven filtering (search button, time checkboxes).
+-- ApplyFilter walks the whole scanCache (up to ~200k after a GetAll), so without
+-- a gate an autoclicker on "search"/a checkbox re-runs that full pass per click
+-- and hangs the client - the same freeze class as the bid bug, a different button.
+-- The internal scan-completion calls keep using ApplyFilter directly (they fire once).
+local function RequestApplyFilter()
+    if #scanCache == 0 then return end
+    if Throttled("filter", 0.3) then return end
+    ApplyFilter()
 end
 
 -- index of a lot in the (small) filtered list, or nil
@@ -261,7 +284,7 @@ end
 -- ===== Reading the auction list =====
 -- GetAuctionItemInfo: 1name 2tex 3cnt 4qual 5canUse 6lvl 7lvlCol 8minBid 9minInc 10buyout 11bidAmt 12high ... 17itemID
 local function ReadIndexInto(cache, i, storeIdx)
-    local name, tex, cnt, qual, _, _, _, minBid, minInc, buyout, bidAmt, _, _, _, _, _, itemID =
+    local name, tex, cnt, qual, _, _, _, minBid, minInc, buyout, bidAmt, high, _, _, _, _, itemID =
         GetAuctionItemInfo("list", i)
     if not name or name == "" then
         if not itemID or itemID == 0 then return end
@@ -271,6 +294,7 @@ local function ReadIndexInto(cache, i, storeIdx)
         bid = CalcBid(minBid, minInc, bidAmt), buyout = buyout or 0,
         timeLeft = GetAuctionItemTimeLeft("list", i),   -- 1<30m 2:30m-2h 3:2-12h 4:>12h
         itemID = itemID, idx = storeIdx and i or nil,
+        led = high or false,            -- we ALREADY lead this lot -> not biddable, hidden from the list
         -- link is resolved lazily in ItemName via itemID; calling
         -- GetAuctionItemLink for every one of 200k+ lots is what made the scan slow
     }
@@ -521,11 +545,14 @@ local function NoSnapshot()
     if actFS then actFS:SetText("Bidding unavailable: run a fresh \"scan auc\" (Auctioneer/Auctionator OFF).") end
 end
 
--- client-side anti-spam: keep a minimum gap between real bids so a burst of
--- clicks / key-repeat doesn't trip the server flood guard ("Internal auction
--- error"). Only actual bids count - skipping/removing a lot is free.
-local BID_MIN_INTERVAL = 0.3
-local lastBidAt = 0
+-- client-side anti-spam: keep a minimum gap between EVERY bid-button action so an
+-- autoclicker can't drive the relocate-scan + table redraw fast enough to freeze
+-- the client. A real BID waits the full interval (it hits the server's flood
+-- guard); SKIPPING an unavailable lot is local-only, so it clears twice as fast.
+local BID_MIN_INTERVAL  = 0.3
+local SKIP_MIN_INTERVAL = 0.15
+local lastActionAt = 0          -- any action (bid OR skip) - the autoclicker/freeze gate
+local lastBidAt    = 0          -- real bids only - the server anti-spam gate
 
 -- Place a real bid on ONE lot at a known live index. Must run inside a hardware
 -- event (button / double-click / key binding).
@@ -535,7 +562,6 @@ local function PlaceOn(it, idx, eff)
     table.insert(pending, it)
     PlaceAuctionBid("list", idx, eff)        -- accepted because we're inside a click
     bidsSent = bidsSent + 1
-    lastBidAt = GetTime and GetTime() or 0
     if actFS then actFS:SetText(string.format("Bid: %s (%s). Placed %d.", ItemName(it), FormatMoney(eff), bidsOK)) end
     UpdateTable()
     ArmBidWatch()
@@ -548,18 +574,27 @@ end
 -- buyout), and bid the CORRECTED live index. Bounded window so we never scan the
 -- whole 200k snapshot. Returns correctedIndex, currentEff or nil.
 local RELOCATE_WINDOW = 150
+-- Returns correctedIndex, currentEff on success. On failure returns nil, nil, ledSeen
+-- where ledSeen=true means our exact lot was found but WE ALREADY LEAD it (high) -
+-- so it is not "gone", it is just already ours.
 local function RelocateInLive(it)
     if not it.idx then return nil end
     local n = GetNumAuctionItems("list") or 0
     if n == 0 then return nil end
+    local ledSeen = false
     local function matchAt(i)
         if i < 1 or i > n then return nil end
-        local name, _, cnt, _, _, _, _, minBid, minInc, buyout, bidAmt, high, _, _, _, _, itemID =
+        local _, _, cnt, _, _, _, _, minBid, minInc, buyout, bidAmt, high, _, _, _, _, itemID =
             GetAuctionItemInfo("list", i)
-        if not name or high then return nil end                 -- empty slot, or we already lead it
+        -- identify by itemID, NOT name: right after a GetAll the item NAMES lag
+        -- (cache loads async), so requiring `name` wrongly marked freshly-sorted
+        -- lots "unavailable". itemID is present even when the name isn't cached;
+        -- an empty/used-up slot has no itemID.
+        if not itemID or itemID == 0 then return nil end
         if it.itemID and itemID ~= it.itemID then return nil end
         if (cnt or 1) ~= (it.cnt or 1) then return nil end
         if (buyout or 0) ~= (it.buyout or 0) then return nil end
+        if high then ledSeen = true; return nil end            -- our exact lot, but WE already lead it
         local eff = CalcBid(minBid, minInc, bidAmt)
         if not PassesFilter(eff, buyout or 0) then return nil end -- price moved out of the filter
         return eff
@@ -570,7 +605,7 @@ local function RelocateInLive(it)
         eff = matchAt(it.idx + d); if eff then return it.idx + d, eff end
         eff = matchAt(it.idx - d); if eff then return it.idx - d, eff end
     end
-    return nil
+    return nil, nil, ledSeen
 end
 
 -- first lot at or after `fromIdx` in the filtered list that we haven't bid yet
@@ -599,6 +634,15 @@ local function BidDebug(tag, it)
     print(string.format("|cff66ccff[CB %s]|r want id=%s '%s' idx=%s | liveN=%s @idx: id=%s '%s' high=%s bid=%s buy=%s | relocate=%s eff=%s",
         tag, tostring(it.itemID), tostring(it.name), tostring(it.idx), tostring(liveN), li, ln, lhigh, lbid, lbuy,
         tostring(ridx), tostring(reff)))
+    -- ordering probe: bids at the head vs the middle vs the tail reveal how the
+    -- LIVE "list" is sorted (if bids rise with position -> sorted by bid).
+    local function at(i)
+        local _, _, _, _, _, _, _, mb, mi, _, ba, _, _, _, _, _, id = GetAuctionItemInfo("list", i)
+        return string.format("[%s]id=%s bid=%s", tostring(i), tostring(id), tostring(CalcBid(mb, mi, ba)))
+    end
+    if liveN > 2 then
+        print("|cff66ccff[CB head]|r " .. at(1) .. " " .. at(math.floor(liveN/2)) .. " " .. at(liveN))
+    end
 end
 
 -- Bid the SELECTED lot only. If that exact lot is gone from the live auction it
@@ -607,6 +651,13 @@ end
 -- clicks walk down to the next fresh lot; the highlight stays on the bid lot.
 local function BidItem(it)
     if isScanning then return end
+    -- Gate the WHOLE action at the FASTER (skip) rate, so an autoclicker can't
+    -- drive the relocate scan / table redraw fast enough to freeze us, while
+    -- unavailable lots still clear quickly. A real bid additionally waits the
+    -- full BID_MIN_INTERVAL below (it hits the server's flood guard).
+    local now = GetTime and GetTime() or 0
+    if now > 0 and (now - lastActionAt) < SKIP_MIN_INTERVAL then return end
+    lastActionAt = now
     ReadFilter()
     -- resolve the target: the selected lot, advancing past lots we've already bid
     local target = it
@@ -619,19 +670,18 @@ local function BidItem(it)
     end
     selectedItem = target
     BidDebug("sel", target)                             -- why is the target (not) biddable?
-    local idx, eff = RelocateInLive(target)
+    local idx, eff, ledSeen = RelocateInLive(target)
     if not idx then
-        -- the selected lot is gone -> drop it, say so, and bid NOTHING else
-        if actFS then actFS:SetText(ItemName(target) .. " - item unavailable, removed.") end
+        -- not biddable -> drop it. Distinguish "we already lead it" from "gone".
+        if actFS then actFS:SetText(ItemName(target) ..
+            (ledSeen and " - you already lead this, removed." or " - item taken/unavailable, removed.")) end
         RemoveItem(target)                              -- advances the highlight to the next surviving lot
         UpdateTable()
         return
     end
-    local now = GetTime and GetTime() or 0              -- anti-spam gap between real bids
-    if now > 0 and (now - lastBidAt) < BID_MIN_INTERVAL then
-        if actFS then actFS:SetText("Too fast - slow down a touch (anti-spam).") end
-        return
-    end
+    -- a real bid: also wait the full gap since the last actual bid (server anti-spam)
+    if now > 0 and (now - lastBidAt) < BID_MIN_INTERVAL then return end
+    lastBidAt = now
     target.idx = idx
     PlaceOn(target, idx, eff)                           -- highlight stays on the bid lot (dimmed)
     ScrollToItem(target); UpdateTable()
@@ -687,6 +737,7 @@ local PANEL_BACKDROP = {
 local C_BUY, C_BID, C_CNT, C_TIME = 96, 96, 38, 58
 
 local function SetSortColumn(key)
+    if Throttled("sort", 0.2) then return end           -- header-spam guard (sorts up to ~4700)
     if sortKey == key then sortAsc = not sortAsc else sortKey = key; sortAsc = (key == "bid" or key == "name" or key == "time") end
     for k, ar in pairs(headerArrows) do
         if k == key then ar:Show(); ar:SetTexCoord(0, 0.5625, sortAsc and 0 or 1, sortAsc and 1 or 0)
@@ -813,7 +864,7 @@ local function BuildUI()
     -- left panel
     leftCol = CreateFrame("Frame", nil, content, bt)
     leftCol:SetPoint("TOPLEFT", content, "TOPLEFT", 7, -76)       -- +5px off the AH frame border
-    leftCol:SetPoint("BOTTOMLEFT", content, "BOTTOMLEFT", 7, 7)   -- match table panel bottom
+    leftCol:SetPoint("BOTTOMLEFT", AuctionFrame, "BOTTOMLEFT", 15, 12)  -- reach the frame's inner bottom (match rightPanel)
     leftCol:SetWidth(170)                                          -- shrink so the right edge stays put
     if leftCol.SetBackdrop then leftCol:SetBackdrop(PANEL_BACKDROP); leftCol:SetBackdropColor(0,0,0,0.55); leftCol:SetBackdropBorderColor(0.45,0.45,0.45) end
 
@@ -858,7 +909,7 @@ local function BuildUI()
         lbl:SetPoint("LEFT", cb, "RIGHT", 1, 0); lbl:SetText(opt[2])
         cb:SetScript("OnClick", function(self)
             filter.times[self.code] = self:GetChecked() and true or false
-            if #scanCache > 0 then ApplyFilter() end
+            RequestApplyFilter()
         end)
         timeChecks[i] = cb
     end
@@ -871,7 +922,7 @@ local function BuildUI()
     -- right panel
     local rightPanel = CreateFrame("Frame", nil, content, bt)
     rightPanel:SetPoint("TOPLEFT", leftCol, "TOPRIGHT", 1, 0)         -- left edge 5px further left
-    rightPanel:SetPoint("BOTTOMRIGHT", content, "BOTTOMRIGHT", 23, 7)
+    rightPanel:SetPoint("BOTTOMRIGHT", AuctionFrame, "BOTTOMRIGHT", -8, 12)  -- stretch to the frame's bottom-right corner
     if rightPanel.SetBackdrop then rightPanel:SetBackdrop(PANEL_BACKDROP); rightPanel:SetBackdropColor(0.045,0.05,0.07,1); rightPanel:SetBackdropBorderColor(0.45,0.45,0.45) end
 
     listFrame = CreateFrame("Frame", "CheapBidsList", rightPanel)
@@ -894,7 +945,7 @@ local function BuildUI()
     searchBtn:SetScript("OnClick", function()
         if isScanning then return end
         if #scanCache == 0 then statusFS:SetText("Run \"" .. SCAN_BTN .. "\" first.") return end
-        ApplyFilter()
+        RequestApplyFilter()
     end)
     bidBtn:SetScript("OnClick", DoSingleBid)
     stopBtn:SetScript("OnClick", StopAll)
@@ -1031,6 +1082,30 @@ hooksecurefunc("PlaceAuctionBid", function(atype, index, bid)
         tostring(atype), tostring(index), tostring(bid), tostring(nb), tostring(total), tostring(name), tostring(link)))
 end)
 
+-- diagnostic: catch ANYTHING (another addon or the default UI) that re-queries or
+-- re-sorts the live "list" AFTER our scan - that is what overwrites our GetAll
+-- snapshot and makes stored indices point at the wrong lot. The stack trace names
+-- the culprit. Our own scan queries are ignored (isScanning). Enable with /cb debug.
+hooksecurefunc("QueryAuctionItems", function()
+    if not debugOn or isScanning then return end
+    print("|cffff5555[CB QUERY]|r live auction list re-queried by:")
+    print(debugstack(2, 6, 0))
+end)
+if SortAuctionItems then
+    hooksecurefunc("SortAuctionItems", function(listType, col)
+        if not debugOn then return end
+        print("|cffff5555[CB SORT]|r SortAuctionItems(" .. tostring(listType) .. ", " .. tostring(col) .. ") by:")
+        print(debugstack(2, 6, 0))
+    end)
+end
+if SortAuctionApplySort then
+    hooksecurefunc("SortAuctionApplySort", function()
+        if not debugOn then return end
+        print("|cffff5555[CB SORT]|r SortAuctionApplySort by:")
+        print(debugstack(2, 6, 0))
+    end)
+end
+
 -- ===== Slash =====
 
 SLASH_CHEAPBIDS1 = "/cb"
@@ -1041,6 +1116,50 @@ SlashCmdList["CHEAPBIDS"] = function(arg)
         debugOn = not debugOn
         print("|cff00cc00[CheapBids]|r bid diagnostics: " .. (debugOn and "ON" or "off") ..
             ". Now place a bid normally and via CheapBids - compare the [CB debug] lines.")
+        return
+    end
+    if arg == "find" then
+        -- full live-list search for the selected lot: tells us where it REALLY is
+        -- vs its stored idx (one-shot, scans the whole list - a brief stutter)
+        -- ONE-SHOT full diagnostic for the selected lot - works on the EXISTING
+        -- snapshot, NO re-scan needed (run it on as many rows as you like after one
+        -- scan). Dumps: stored data, what is live at our idx, biddable/led/total
+        -- counts, nearest distance, and SAMPLES of this item's real lots.
+        local it = selectedItem
+        if not it then print("|cffff4444[CB find]|r select a lot in the table first.") return end
+        local n = GetNumAuctionItems("list") or 0
+        print(string.format("|cffffcc00[CB find]|r STORED id=%s '%s' cnt=%s buy=%s bid=%s idx=%s done=%s att=%s | liveN=%s cache=%s found=%s",
+            tostring(it.itemID), tostring(it.name), tostring(it.cnt), tostring(it.buyout), tostring(it.bid),
+            tostring(it.idx), tostring(it.done and 1 or 0), tostring(attempted[it] and 1 or 0),
+            tostring(n), tostring(#scanCache), tostring(#cheapItems)))
+        if it.idx then
+            local nm, _, c2, _, _, _, _, mb, mi, b2, ba, hi, _, _, _, _, id2 = GetAuctionItemInfo("list", it.idx)
+            print(string.format("|cffffcc00[CB find]|r @idx %s: id=%s '%s' cnt=%s buy=%s bid=%s high=%s",
+                tostring(it.idx), tostring(id2), tostring(nm), tostring(c2), tostring(b2), tostring(CalcBid(mb, mi, ba)), tostring(hi)))
+        end
+        local biddable, highLed, sameAny, first, nearest = 0, 0, 0, nil, nil
+        local samples = {}
+        for i = 1, n do
+            local _, _, cnt, _, _, _, _, mb, mi, buy, ba, high, _, _, _, _, id = GetAuctionItemInfo("list", i)
+            if id and id == it.itemID then
+                sameAny = sameAny + 1
+                local exact = (cnt or 1) == (it.cnt or 1) and (buy or 0) == (it.buyout or 0)
+                if exact and not high then
+                    biddable = biddable + 1
+                    if not first then first = i end
+                    local d = math.abs(i - (it.idx or 0)); if not nearest or d < nearest then nearest = d end
+                elseif exact and high then
+                    highLed = highLed + 1
+                end
+                if #samples < 6 then
+                    samples[#samples + 1] = string.format("[%d]cnt=%s buy=%s bid=%s hi=%s",
+                        i, tostring(cnt), tostring(buy), tostring(CalcBid(mb, mi, ba)), tostring(high))
+                end
+            end
+        end
+        print(string.format("|cffffcc00[CB find]|r id=%s biddable=%s highLed=%s sameItemAny=%s first=%s nearest=%s",
+            tostring(it.itemID), tostring(biddable), tostring(highLed), tostring(sameAny), tostring(first), tostring(nearest)))
+        print("|cffffcc00[CB find]|r samples: " .. table.concat(samples, "  "))
         return
     end
     if myTabID and _G["AuctionFrameTab"..myTabID] then _G["AuctionFrameTab"..myTabID]:Click()
