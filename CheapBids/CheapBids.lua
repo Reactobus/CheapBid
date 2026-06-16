@@ -521,6 +521,12 @@ local function NoSnapshot()
     if actFS then actFS:SetText("Bidding unavailable: run a fresh \"scan auc\" (Auctioneer/Auctionator OFF).") end
 end
 
+-- client-side anti-spam: keep a minimum gap between real bids so a burst of
+-- clicks / key-repeat doesn't trip the server flood guard ("Internal auction
+-- error"). Only actual bids count - skipping/removing a lot is free.
+local BID_MIN_INTERVAL = 0.3
+local lastBidAt = 0
+
 -- Place a real bid on ONE lot at a known live index. Must run inside a hardware
 -- event (button / double-click / key binding).
 local function PlaceOn(it, idx, eff)
@@ -529,6 +535,7 @@ local function PlaceOn(it, idx, eff)
     table.insert(pending, it)
     PlaceAuctionBid("list", idx, eff)        -- accepted because we're inside a click
     bidsSent = bidsSent + 1
+    lastBidAt = GetTime and GetTime() or 0
     if actFS then actFS:SetText(string.format("Bid: %s (%s). Placed %d.", ItemName(it), FormatMoney(eff), bidsOK)) end
     UpdateTable()
     ArmBidWatch()
@@ -566,15 +573,13 @@ local function RelocateInLive(it)
     return nil
 end
 
--- Try to bid ONE lot. Relocates it in the live list first (indices drift), then
--- bids the corrected index. Returns true if a bid was sent.
-local function TryBid(it)
-    if not it or attempted[it] or not it.idx then return false end
-    local idx, eff = RelocateInLive(it)
-    if not idx then return false end
-    it.idx = idx                                -- remember the corrected slot for reconcile/confirm
-    PlaceOn(it, idx, eff)
-    return true
+-- first lot at or after `fromIdx` in the filtered list that we haven't bid yet
+local function NextUnattempted(fromIdx)
+    for i = fromIdx, #cheapItems do
+        local v = cheapItems[i]
+        if not attempted[v] then return v end
+    end
+    return nil
 end
 
 -- diagnostic: dump what the LIVE "list" shows at a lot's cached idx, so we can
@@ -596,36 +601,40 @@ local function BidDebug(tag, it)
         tostring(ridx), tostring(reff)))
 end
 
--- Bid the selected lot; if its snapshot slot is stale, walk FORWARD from the
--- selection to the first lot that still bids (snapshot indices go stale fast).
--- Whatever lot actually gets the bid becomes the new selection and is scrolled
--- into view, so the player always sees which lot was bid and the highlight
--- visibly walks down the list. The GetAll snapshot is valid only briefly, so
--- bid right after scanning.
-local BID_MAXTRY = 25                                    -- cap window-relocate scans per click
+-- Bid the SELECTED lot only. If that exact lot is gone from the live auction it
+-- is REMOVED from the list with an "unavailable" message and NO bid is placed on
+-- any other lot (asked for explicitly). Lots already bid are skipped, so repeated
+-- clicks walk down to the next fresh lot; the highlight stays on the bid lot.
 local function BidItem(it)
     if isScanning then return end
     ReadFilter()
-    BidDebug("sel", it)                                 -- why is the SELECTED lot (not) biddable?
-    local start = IndexOf(it) or 1
-    local skipped, tries = 0, 0
-    local function landed(v)                             -- highlight + report the lot we actually bid
-        selectedItem = v; ScrollToItem(v); UpdateTable()
-        if actFS then actFS:SetText(string.format("Bid: %s%s | ok %d, pending %d",
-            ItemName(v), skipped > 0 and ("  [skipped " .. skipped .. " taken/stale]") or "",
-            bidsOK, #pending)) end
+    -- resolve the target: the selected lot, advancing past lots we've already bid
+    local target = it
+    if not target or attempted[target] then
+        target = NextUnattempted(IndexOf(it) or 1)
     end
-    -- the selected lot first, then forward, then wrap to the top - bounded by tries
-    local total = #cheapItems
-    for off = 0, total - 1 do
-        local i = start + off
-        if i > total then i = i - total end             -- wrap
-        local v = cheapItems[i]
-        if TryBid(v) then landed(v); return end
-        skipped = skipped + 1; tries = tries + 1
-        if tries >= BID_MAXTRY then break end
+    if not target then
+        if actFS then actFS:SetText("No fresh lot to bid - rescan when \"scan auc\" is green.") end
+        return
     end
-    if actFS then actFS:SetText("No biddable lot left in the snapshot - filtered lots taken/stale. Rescan when \"scan auc\" is green.") end
+    selectedItem = target
+    BidDebug("sel", target)                             -- why is the target (not) biddable?
+    local idx, eff = RelocateInLive(target)
+    if not idx then
+        -- the selected lot is gone -> drop it, say so, and bid NOTHING else
+        if actFS then actFS:SetText(ItemName(target) .. " - item unavailable, removed.") end
+        RemoveItem(target)                              -- advances the highlight to the next surviving lot
+        UpdateTable()
+        return
+    end
+    local now = GetTime and GetTime() or 0              -- anti-spam gap between real bids
+    if now > 0 and (now - lastBidAt) < BID_MIN_INTERVAL then
+        if actFS then actFS:SetText("Too fast - slow down a touch (anti-spam).") end
+        return
+    end
+    target.idx = idx
+    PlaceOn(target, idx, eff)                           -- highlight stays on the bid lot (dimmed)
+    ScrollToItem(target); UpdateTable()
 end
 
 local function DoSingleBid()
