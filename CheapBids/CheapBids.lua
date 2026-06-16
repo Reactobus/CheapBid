@@ -14,7 +14,8 @@
 local ADDON_NAME = "CheapBids"
 local SCAN_BTN   = "scan auc"
 local PER_PAGE   = NUM_AUCTION_ITEMS_PER_PAGE or 50
-local GETALL_COOLDOWN = 900
+local GETALL_COOLDOWN = 1080      -- ~18 min: observed a bit longer than the nominal 15;
+                                  -- only a hint for the countdown, CanSendAuctionQuery is the real gate
 local ROW_H      = 18
 local BID_OK  = ERR_AUCTION_BID_PLACED or "Bid accepted"
 local AUC_ERR = ERR_AUCTION_DATABASE_ERROR or "Internal auction error."
@@ -230,6 +231,33 @@ local function ApplyFilter()
     C_Timer.After(0.7, function() if uiBuilt and not isScanning then UpdateTable() end end)
 end
 
+-- index of a lot in the (small) filtered list, or nil
+local function IndexOf(it)
+    if not it then return nil end
+    for i, v in ipairs(cheapItems) do if v == it then return i end end
+    return nil
+end
+
+-- scroll the table so `it` is visible (keeps the just-bid lot in view so the
+-- highlight is never off-screen)
+local function ScrollToItem(it)
+    if not it or not fauxScroll then return end
+    local idx = IndexOf(it)
+    if not idx then return end
+    local offset = FauxScrollFrame_GetOffset(fauxScroll) or 0
+    -- only scroll when the target is OUTSIDE the visible window; then place it a
+    -- couple rows from the top so the UPCOMING lots stay visible below it (the
+    -- bid walks downward as live lots get taken).
+    if idx > offset and idx <= offset + NUM_ROWS then return end
+    local lead = math.min(2, NUM_ROWS - 1)              -- rows of context above the target
+    local newOffset = idx - 1 - lead
+    if newOffset < 0 then newOffset = 0 end
+    if newOffset ~= offset then
+        local sb = _G["CheapBidsFauxScrollBar"]
+        if sb then sb:SetValue(newOffset * ROW_H) end   -- fires OnVerticalScroll -> UpdateTable
+    end
+end
+
 -- ===== Reading the auction list =====
 -- GetAuctionItemInfo: 1name 2tex 3cnt 4qual 5canUse 6lvl 7lvlCol 8minBid 9minInc 10buyout 11bidAmt 12high ... 17itemID
 local function ReadIndexInto(cache, i, storeIdx)
@@ -365,9 +393,22 @@ end
 -- (it can hold 200k+ items -> "script ran too long").
 local function RemoveItem(it)
     it.done = true
-    if it == selectedItem then selectedItem = nil end
     if it == focusItem then focusItem = nil; focusReady = false end
-    for i, v in ipairs(cheapItems) do if v == it then table.remove(cheapItems, i); break end end
+    local removedIdx
+    for i, v in ipairs(cheapItems) do if v == it then removedIdx = i; table.remove(cheapItems, i); break end end
+    -- when the removed lot was the highlighted one, ADVANCE the highlight to the
+    -- lot now occupying that slot (or the new last lot) instead of clearing it -
+    -- so on confirm the selection visibly walks down and the next bid continues
+    -- from here rather than jumping back to the top of the list.
+    if it == selectedItem then
+        if removedIdx and #cheapItems > 0 then
+            local nextIdx = removedIdx > #cheapItems and #cheapItems or removedIdx
+            selectedItem = cheapItems[nextIdx]
+            ScrollToItem(selectedItem)
+        else
+            selectedItem = nil
+        end
+    end
 end
 
 -- Find the live-list index of the auction matching `it` (same item, count, prices
@@ -509,17 +550,52 @@ local function TryBid(it)
     return true
 end
 
--- Bid the selected lot; if its snapshot slot is stale, bid the next lot that IS
--- still valid (this is the behaviour that reliably placed bids). The GetAll
--- snapshot is valid only briefly, so bid right after scanning.
+-- diagnostic: dump what the LIVE "list" shows at a lot's cached idx, so we can
+-- see WHY the selected lot is (not) biddable - snapshot replaced (liveN small),
+-- re-sorted/desynced (id mismatch), already led (high=true), or uncached (nil).
+local function BidDebug(tag, it)
+    if not debugOn or not it then return end
+    local liveN = GetNumAuctionItems("list") or 0
+    local ln, li, lhigh, lbid, lbuy = "nil", "nil", "nil", "nil", "nil"
+    if it.idx then
+        local name, _, _, _, _, _, _, minBid, minInc, buyout, bidAmt, high, _, _, _, _, itemID =
+            GetAuctionItemInfo("list", it.idx)
+        ln = tostring(name); li = tostring(itemID); lhigh = tostring(high)
+        lbid = tostring(CalcBid(minBid, minInc, bidAmt)); lbuy = tostring(buyout)
+    end
+    print(string.format("|cff66ccff[CB %s]|r want id=%s '%s' idx=%s | liveN=%s @idx: id=%s '%s' high=%s bid=%s buy=%s",
+        tag, tostring(it.itemID), tostring(it.name), tostring(it.idx), tostring(liveN), li, ln, lhigh, lbid, lbuy))
+end
+
+-- Bid the selected lot; if its snapshot slot is stale, walk FORWARD from the
+-- selection to the first lot that still bids (snapshot indices go stale fast).
+-- Whatever lot actually gets the bid becomes the new selection and is scrolled
+-- into view, so the player always sees which lot was bid and the highlight
+-- visibly walks down the list. The GetAll snapshot is valid only briefly, so
+-- bid right after scanning.
 local function BidItem(it)
     if isScanning then return end
     ReadFilter()
-    if TryBid(it) then return end                       -- prefer the selected lot
-    for _, v in ipairs(cheapItems) do                   -- else the first still-valid lot
-        if v ~= it and TryBid(v) then return end
+    BidDebug("sel", it)                                 -- why is the SELECTED lot (not) biddable?
+    local start = IndexOf(it) or 1
+    local skipped = 0
+    local function landed(v)                             -- highlight + report the lot we actually bid
+        selectedItem = v; ScrollToItem(v); UpdateTable()
+        if actFS then actFS:SetText(string.format("Bid: %s%s | ok %d, pending %d",
+            ItemName(v), skipped > 0 and ("  [skipped " .. skipped .. " taken/stale]") or "",
+            bidsOK, #pending)) end
     end
-    if actFS then actFS:SetText("No biddable lot in the snapshot - rescan with \"scan auc\" and bid right after.") end
+    for i = start, #cheapItems do                       -- the selected lot, then forward
+        local v = cheapItems[i]
+        if TryBid(v) then landed(v); return end
+        skipped = skipped + 1
+    end
+    for i = 1, start - 1 do                              -- wrap to the top if needed
+        local v = cheapItems[i]
+        if TryBid(v) then landed(v); return end
+        skipped = skipped + 1
+    end
+    if actFS then actFS:SetText("No biddable lot left in the snapshot - all filtered lots are taken/stale. Rescan when \"scan auc\" is green.") end
 end
 
 local function DoSingleBid()
@@ -789,6 +865,40 @@ end
 
 -- ===== Tab =====
 
+-- Poll the server's GetAll gate so the player can SEE when a fresh scan is
+-- allowed: the cooldown runs ~15-18 min and CanSendAuctionQuery is the ONLY
+-- authority (our minute estimate is just a hint). Tints "scan auc" GREEN the
+-- moment a GetAll is actually permitted, white while it is cooling down.
+local readyToken = 0
+local function PollGetAllReady()
+    readyToken = readyToken + 1
+    local tk = readyToken
+    local function tick()
+        if tk ~= readyToken then return end                          -- superseded by a newer poll
+        if not (uiBuilt and AuctionFrame and AuctionFrame:IsVisible()
+                and content and content:IsShown()) then return end   -- tab/AH closed -> stop the chain
+        if not isScanning and scanBtn then
+            local _, canAll = CanSendAuctionQuery()
+            local fs = scanBtn:GetFontString()
+            if canAll then
+                scanBtn:SetText(SCAN_BTN)
+                if fs then fs:SetTextColor(0.3, 1.0, 0.3) end            -- green = scan now
+            else
+                local last = (CheapBidsDB and CheapBidsDB.lastGetAll) or 0
+                local left = last > 0 and (GETALL_COOLDOWN - (time() - last)) or 0
+                if left > 0 then
+                    scanBtn:SetText(string.format("%s  %d:%02d", SCAN_BTN, math.floor(left / 60), left % 60))
+                else
+                    scanBtn:SetText(SCAN_BTN)                            -- estimate elapsed, server still gating
+                end
+                if fs then fs:SetTextColor(1, 1, 1) end                 -- white = not ready yet
+            end
+        end
+        C_Timer.After(2, tick)
+    end
+    tick()
+end
+
 local function ShowCB()
     if not content then return end
     if AuctionFrameBrowse then AuctionFrameBrowse:Hide() end
@@ -802,6 +912,7 @@ local function ShowCB()
         statusFS:SetText("List from a previous scan. After reopening the AH the snapshot is stale - run \"scan auc\" again to bid.")
     end
     if myTabID then PanelTemplates_SetTab(AuctionFrame, myTabID) end
+    PollGetAllReady()                       -- light up "scan auc" green when GetAll is available
 end
 local function HideCB() if content then content:Hide() end end
 
