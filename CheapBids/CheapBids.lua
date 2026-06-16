@@ -534,19 +534,46 @@ local function PlaceOn(it, idx, eff)
     ArmBidWatch()
 end
 
--- Bid one specific lot. Order: (1) a fresh focused list for this exact lot is the
--- most accurate; (2) else the GetAll snapshot if still valid at the cached index
--- (one click right after a scan); (3) else fire a focused re-query and ask for one
--- more click. This is what makes bidding survive a stale snapshot.
--- Try to bid ONE lot directly from the snapshot. Returns true if a bid was sent.
+-- The GetAll snapshot indices DRIFT: as auctions sell/expire the live "list"
+-- shifts, so a stored idx soon points at a DIFFERENT lot (proven via /cb debug:
+-- want id=10513 @idx=24549 but the live list there held id=6712). So before
+-- bidding, RE-FIND this exact lot near its old index by content (item + count +
+-- buyout), and bid the CORRECTED live index. Bounded window so we never scan the
+-- whole 200k snapshot. Returns correctedIndex, currentEff or nil.
+local RELOCATE_WINDOW = 150
+local function RelocateInLive(it)
+    if not it.idx then return nil end
+    local n = GetNumAuctionItems("list") or 0
+    if n == 0 then return nil end
+    local function matchAt(i)
+        if i < 1 or i > n then return nil end
+        local name, _, cnt, _, _, _, _, minBid, minInc, buyout, bidAmt, high, _, _, _, _, itemID =
+            GetAuctionItemInfo("list", i)
+        if not name or high then return nil end                 -- empty slot, or we already lead it
+        if it.itemID and itemID ~= it.itemID then return nil end
+        if (cnt or 1) ~= (it.cnt or 1) then return nil end
+        if (buyout or 0) ~= (it.buyout or 0) then return nil end
+        local eff = CalcBid(minBid, minInc, bidAmt)
+        if not PassesFilter(eff, buyout or 0) then return nil end -- price moved out of the filter
+        return eff
+    end
+    local eff = matchAt(it.idx)                                 -- fast path: index still valid
+    if eff then return it.idx, eff end
+    for d = 1, RELOCATE_WINDOW do                               -- drift: search outward from the old index
+        eff = matchAt(it.idx + d); if eff then return it.idx + d, eff end
+        eff = matchAt(it.idx - d); if eff then return it.idx - d, eff end
+    end
+    return nil
+end
+
+-- Try to bid ONE lot. Relocates it in the live list first (indices drift), then
+-- bids the corrected index. Returns true if a bid was sent.
 local function TryBid(it)
     if not it or attempted[it] or not it.idx then return false end
-    local name, _, _, _, _, _, _, minBid, minInc, buyout, bidAmt, high, _, _, _, _, itemID =
-        GetAuctionItemInfo("list", it.idx)
-    if not name or high or (it.itemID and itemID ~= it.itemID) then return false end
-    local eff = CalcBid(minBid, minInc, bidAmt)
-    if not PassesFilter(eff, buyout or 0) then return false end
-    PlaceOn(it, it.idx, eff)
+    local idx, eff = RelocateInLive(it)
+    if not idx then return false end
+    it.idx = idx                                -- remember the corrected slot for reconcile/confirm
+    PlaceOn(it, idx, eff)
     return true
 end
 
@@ -563,8 +590,10 @@ local function BidDebug(tag, it)
         ln = tostring(name); li = tostring(itemID); lhigh = tostring(high)
         lbid = tostring(CalcBid(minBid, minInc, bidAmt)); lbuy = tostring(buyout)
     end
-    print(string.format("|cff66ccff[CB %s]|r want id=%s '%s' idx=%s | liveN=%s @idx: id=%s '%s' high=%s bid=%s buy=%s",
-        tag, tostring(it.itemID), tostring(it.name), tostring(it.idx), tostring(liveN), li, ln, lhigh, lbid, lbuy))
+    local ridx, reff = RelocateInLive(it)
+    print(string.format("|cff66ccff[CB %s]|r want id=%s '%s' idx=%s | liveN=%s @idx: id=%s '%s' high=%s bid=%s buy=%s | relocate=%s eff=%s",
+        tag, tostring(it.itemID), tostring(it.name), tostring(it.idx), tostring(liveN), li, ln, lhigh, lbid, lbuy,
+        tostring(ridx), tostring(reff)))
 end
 
 -- Bid the selected lot; if its snapshot slot is stale, walk FORWARD from the
@@ -573,29 +602,30 @@ end
 -- into view, so the player always sees which lot was bid and the highlight
 -- visibly walks down the list. The GetAll snapshot is valid only briefly, so
 -- bid right after scanning.
+local BID_MAXTRY = 25                                    -- cap window-relocate scans per click
 local function BidItem(it)
     if isScanning then return end
     ReadFilter()
     BidDebug("sel", it)                                 -- why is the SELECTED lot (not) biddable?
     local start = IndexOf(it) or 1
-    local skipped = 0
+    local skipped, tries = 0, 0
     local function landed(v)                             -- highlight + report the lot we actually bid
         selectedItem = v; ScrollToItem(v); UpdateTable()
         if actFS then actFS:SetText(string.format("Bid: %s%s | ok %d, pending %d",
             ItemName(v), skipped > 0 and ("  [skipped " .. skipped .. " taken/stale]") or "",
             bidsOK, #pending)) end
     end
-    for i = start, #cheapItems do                       -- the selected lot, then forward
+    -- the selected lot first, then forward, then wrap to the top - bounded by tries
+    local total = #cheapItems
+    for off = 0, total - 1 do
+        local i = start + off
+        if i > total then i = i - total end             -- wrap
         local v = cheapItems[i]
         if TryBid(v) then landed(v); return end
-        skipped = skipped + 1
+        skipped = skipped + 1; tries = tries + 1
+        if tries >= BID_MAXTRY then break end
     end
-    for i = 1, start - 1 do                              -- wrap to the top if needed
-        local v = cheapItems[i]
-        if TryBid(v) then landed(v); return end
-        skipped = skipped + 1
-    end
-    if actFS then actFS:SetText("No biddable lot left in the snapshot - all filtered lots are taken/stale. Rescan when \"scan auc\" is green.") end
+    if actFS then actFS:SetText("No biddable lot left in the snapshot - filtered lots taken/stale. Rescan when \"scan auc\" is green.") end
 end
 
 local function DoSingleBid()
