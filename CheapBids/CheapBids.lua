@@ -109,10 +109,24 @@ local function TimeShown(code)
     return filter.times[code] ~= false
 end
 
+-- Quality used for the rarity filter. The GetAll snapshot's own quality field
+-- (GetAuctionItemInfo #4) is UNRELIABLE for items not yet in the local cache - the
+-- same lag that loads names late during a full scan - so prefer GetItemInfo's
+-- quality (#3), the SAME source as the colored link the player sees, and memoize
+-- it on it.q. Fall back to the snapshot value only until the template is cached.
+local function ItemQuality(it)
+    if it.q ~= nil then return it.q end
+    if it.itemID and it.itemID ~= 0 then
+        local q = select(3, GetItemInfo(it.itemID))     -- nil while uncached (also kicks off the load)
+        if q then it.q = q; return q end
+    end
+    return it.qual
+end
+
 -- rarity filter: nil = All; otherwise the lot's quality must match exactly (0..4)
-local function QualityShown(qual)
+local function QualityShown(it)
     if filter.quality == nil then return true end
-    return qual == filter.quality
+    return ItemQuality(it) == filter.quality
 end
 
 local function FilterDesc()
@@ -258,7 +272,7 @@ local function ApplyFilter()
     ReadFilter()
     cheapItems = {}
     for _, it in ipairs(scanCache) do
-        if not it.done and not it.led and TimeShown(it.timeLeft) and QualityShown(it.qual) and PassesFilter(it.bid, it.buyout) then cheapItems[#cheapItems + 1] = it end
+        if not it.done and not it.led and TimeShown(it.timeLeft) and PassesFilter(it.bid, it.buyout) and QualityShown(it) then cheapItems[#cheapItems + 1] = it end
     end
     SortItems()
     selectedItem = nil
@@ -873,6 +887,7 @@ local function BuildUI()
     local buyTo = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     buyTo:SetPoint("LEFT", mBuyMin.last, "RIGHT", 8, 0); buyTo:SetText("to:")
     mBuyMax = MakeMoney(content, buyTo, 6)
+    mBuyMin.g:SetText("1")          -- default "Buyout from" = 1g
 
     -- left panel
     leftCol = CreateFrame("Frame", nil, content, bt)
@@ -934,7 +949,7 @@ local function BuildUI()
     -- bid feedback lives under the checkboxes
     actFS = leftCol:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     actFS:SetPoint("TOPLEFT", timeChecks[3], "BOTTOMLEFT", 0, -12)
-    actFS:SetWidth(162); actFS:SetJustifyH("LEFT"); actFS:SetWordWrap(true)
+    actFS:SetWidth(152); actFS:SetJustifyH("LEFT"); actFS:SetWordWrap(true)  -- <162: small right margin so text doesn't touch the border
 
     -- right panel
     local rightPanel = CreateFrame("Frame", nil, content, bt)
@@ -988,6 +1003,12 @@ local function BuildUI()
         -- so "All" would set quality=-1 (matches nothing) instead of nil (matches all)
         if self.value == -1 then filter.quality = nil else filter.quality = self.value end
         RequestApplyFilter()                                    -- same path the time checkboxes use
+        -- ItemQuality reads GetItemInfo, which loads async for uncached lots; the
+        -- filter pass above kicks those loads off, so re-run once they settle so
+        -- freshly-resolved rarities are included.
+        if filter.quality ~= nil then
+            C_Timer.After(0.8, function() if uiBuilt and not isScanning then ApplyFilter() end end)
+        end
     end
     UIDropDownMenu_Initialize(rarityDD, function()
         for _, opt in ipairs(RARITY_OPTS) do
