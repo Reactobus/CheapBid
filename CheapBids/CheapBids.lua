@@ -14,8 +14,8 @@
 local ADDON_NAME = "CheapBids"
 local SCAN_BTN   = "scan auc"
 local PER_PAGE   = NUM_AUCTION_ITEMS_PER_PAGE or 50
-local GETALL_COOLDOWN = 1080      -- ~18 min: observed a bit longer than the nominal 15;
-                                  -- only a hint for the countdown, CanSendAuctionQuery is the real gate
+local GETALL_COOLDOWN = 940       -- ~15:40 observed; only a hint for the countdown,
+                                  -- CanSendAuctionQuery (green button) is the real gate
 local ROW_H      = 18
 local BID_OK  = ERR_AUCTION_BID_PLACED or "Bid accepted"
 local AUC_ERR = ERR_AUCTION_DATABASE_ERROR or "Internal auction error."
@@ -35,11 +35,12 @@ local pending = {}                   -- FIFO of bids awaiting server reply
 local bidWatch = 0                   -- watchdog / step token
 local bidsSent, bidsOK, bidsFail = 0, 0, 0
 local debugOn = false
-
--- focused re-query state: the selected lot is re-queried (small exact-match list)
--- so its live index is fresh at bid time (the GetAll snapshot goes stale fast)
-local focusItem, focusReady, focusQuerying = nil, false, false
-local focusTok = 0
+local floodMode = false              -- a real flood -> throttled token-bucket bidding; cleared on AH reopen
+local floodAnchor = 0                -- token-bucket baseline: 1 bid earned per FLOOD_LOCK since this time
+local FLOOD_LOCK = 2.0               -- flood mode: avg 1 bid / this many seconds (waiting banks bids)
+local lockTok = 0                    -- token to invalidate stale button re-enable timers
+local prevErrAt = 0                  -- time of the previous auction error (to detect a flood cluster)
+local FLOOD_WINDOW = 3.0             -- two errors within this window = a real flood (not a stale lot)
 
 local uiBuilt, myTabID = false, nil
 local selectedItem = nil
@@ -189,9 +190,26 @@ local function UpdateButtons()
     cacheFS:SetText("Cache: " .. #scanCache)
     foundFS:SetText("Found: " .. #cheapItems)
     if searchBtn then searchBtn:SetEnabled(#scanCache > 0 and idle) end
-    if bidBtn    then bidBtn:SetEnabled(#cheapItems > 0 and idle) end
+    local now = GetTime and GetTime() or 0
+    local locked = floodMode and now > 0 and now < floodAnchor + FLOOD_LOCK   -- no bid earned yet
+    if bidBtn    then bidBtn:SetEnabled(#cheapItems > 0 and idle and not locked) end
     if stopBtn   then stopBtn:SetEnabled(isScanning) end
     if scanBtn   then scanBtn:SetText(isScanning and "Stop" or SCAN_BTN) end
+end
+
+-- flood-mode token bucket: 1 bid is earned per FLOOD_LOCK seconds since floodAnchor,
+-- so waiting banks bids. Refresh the button state and, if no bid is earned yet,
+-- schedule a re-enable for when the next one is.
+local function RefreshBidLock()
+    UpdateButtons()
+    local now = GetTime and GetTime() or 0
+    if floodMode and now > 0 and now < floodAnchor + FLOOD_LOCK then
+        lockTok = lockTok + 1
+        local mytok = lockTok
+        C_Timer.After(floodAnchor + FLOOD_LOCK - now, function()
+            if mytok == lockTok then UpdateButtons() end
+        end)
+    end
 end
 
 local function UpdateTable()
@@ -359,7 +377,6 @@ local function StartScan()
     end
     pageConfirm = false; cacheFromGetAll = false
     attempted = {}; pending = {}; bidsSent = 0; bidsOK = 0; bidsFail = 0; bidWatch = bidWatch + 1
-    focusItem = nil; focusReady = false; focusQuerying = false
     if CheapBidsDB then CheapBidsDB.lastGetAll = time() end
     scanCache = {}; cheapItems = {}; UpdateTable()
     scanToken = scanToken + 1
@@ -409,15 +426,14 @@ end
 --   2) The full-scan (GetAll) snapshot goes STALE fast - after a few bids or a
 --      little time, GetAuctionItemInfo("list", idx) no longer matches our cache,
 --      so bidding straight off the snapshot fails ("no available lots").
--- So we bid like Auctionator/Auctioneer: re-query the ONE selected lot with a
--- small exact-match search (sorted by bid) to refresh the live list, then place
--- the bid from THAT fresh list inside the click. MatchInLive finds the exact lot.
+-- So we DON'T re-query (a focused query overwrites the live snapshot and broke the
+-- direct path). Instead RelocateInLive re-finds the exact lot near its stored idx by
+-- content (item + count + buyout) and bids the corrected live index inside the click.
 
 -- Mark done + drop from the (small) filtered list. NEVER linear-scan scanCache
 -- (it can hold 200k+ items -> "script ran too long").
 local function RemoveItem(it)
     it.done = true
-    if it == focusItem then focusItem = nil; focusReady = false end
     local removedIdx
     for i, v in ipairs(cheapItems) do if v == it then removedIdx = i; table.remove(cheapItems, i); break end end
     -- when the removed lot was the highlighted one, ADVANCE the highlight to the
@@ -433,46 +449,6 @@ local function RemoveItem(it)
             selectedItem = nil
         end
     end
-end
-
--- Find the live-list index of the auction matching `it` (same item, count, prices
--- and not already led by us). Safe ONLY on a small list (a focused query result);
--- capped so it can never scan a 200k GetAll snapshot.
-local function MatchInLive(it)
-    local n = math.min(GetNumAuctionItems("list") or 0, 300)
-    for i = 1, n do
-        local name, _, cnt, _, _, _, _, minBid, minInc, buyout, bidAmt, high, _, _, _, _, itemID =
-            GetAuctionItemInfo("list", i)
-        if name and not high
-           and (not it.itemID or itemID == it.itemID)
-           and (cnt or 1) == (it.cnt or 1)
-           and (buyout or 0) == (it.buyout or 0) then
-            local eff = CalcBid(minBid, minInc, bidAmt)
-            -- price may have moved since the scan; bid the CURRENT amount if it's still in range
-            if PassesFilter(eff, buyout or 0) then return i, eff end
-        end
-    end
-    return nil
-end
-
--- Refresh the live list for one lot via a small exact-match query, sorted by bid
--- so our 1-99c lot lands on the first page. This replaces the GetAll snapshot in
--- "list" - fine, because the table shows our own cached copy, not the live list.
-local function FocusQuery(it)
-    if isScanning or not it or not it.name or it.name == "" then return end
-    if focusItem == it and (focusQuerying or focusReady) then return end
-    focusItem = it; focusReady = false; focusQuerying = true
-    focusTok = focusTok + 1
-    local tok, nm = focusTok, it.name
-    SafeQuery(function()
-        if focusItem ~= it then return end
-        pcall(SortAuctionSetSort, "list", "bid", false)       -- best effort; must NOT block the query
-        QueryAuctionItems(nm, nil, nil, 0, nil, nil, false, true, nil)   -- exact match, page 0
-    end)
-    -- safety: if no AUCTION_ITEM_LIST_UPDATE arrives, free the flag so a retry re-queries
-    C_Timer.After(4, function()
-        if tok == focusTok and focusQuerying and not focusReady then focusQuerying = false end
-    end)
 end
 
 -- watchdog: if a sent bid gets no reply in 6s, free it (retryable)
@@ -535,9 +511,29 @@ local function RejectOldest()
     local it = table.remove(pending, 1)
     if not it then return end
     bidsFail = bidsFail + 1
-    attempted[it] = nil
-    if actFS then actFS:SetText(string.format(
-        "Placed: %d, rejected by server: %d.", bidsOK, bidsFail)) end
+    attempted[it] = nil                 -- retryable (NOT removed - the lot stays in the list)
+    -- "Internal auction error" fires for a STALE lot (isolated, normal) AND for the
+    -- server flood guard. Only a CLUSTER - a 2nd error within FLOOD_WINDOW - is a real
+    -- flood -> switch to the token-bucket pace + lock. An isolated one is just "retry".
+    local now = GetTime and GetTime() or 0
+    if not floodMode and prevErrAt > 0 and now > 0 and (now - prevErrAt) < FLOOD_WINDOW then
+        floodMode = true
+    end
+    prevErrAt = now
+    if floodMode then floodAnchor = now; RefreshBidLock() end
+    -- pull the highlight BACK to the rejected lot so the player retries IT, instead
+    -- of letting rapid bids walk the target forward past lots the server bounced.
+    local ri, si = IndexOf(it), IndexOf(selectedItem)
+    if ri and (not si or ri < si) then selectedItem = it; ScrollToItem(it) end
+    if actFS then
+        if floodMode then
+            actFS:SetText(string.format("Server flood - now 1 bid / %.0fs (waiting banks bids). Placed: %d, rejected: %d.",
+                FLOOD_LOCK, bidsOK, bidsFail))
+        else
+            actFS:SetText(string.format("Bid rejected (stale lot) - retry. Placed: %d, rejected: %d.",
+                bidsOK, bidsFail))
+        end
+    end
     UpdateTable()
 end
 
@@ -658,6 +654,14 @@ local function BidItem(it)
     local now = GetTime and GetTime() or 0
     if now > 0 and (now - lastActionAt) < SKIP_MIN_INTERVAL then return end
     lastActionAt = now
+    -- FLOOD MODE token bucket: a bid is earned every FLOOD_LOCK since the last error
+    -- (waiting banks bids). If none earned yet, HOLD - don't advance/remove/bid; the
+    -- rejected lot stays selected so the player retries it once a token is available.
+    if floodMode and now > 0 and now < floodAnchor + FLOOD_LOCK then
+        if actFS then actFS:SetText(string.format("Server flood - next bid in %.1fs (1 / %.0fs).",
+            floodAnchor + FLOOD_LOCK - now, FLOOD_LOCK)) end
+        return
+    end
     ReadFilter()
     -- resolve the target: the selected lot, advancing past lots we've already bid
     local target = it
@@ -684,6 +688,7 @@ local function BidItem(it)
     lastBidAt = now
     target.idx = idx
     PlaceOn(target, idx, eff)                           -- highlight stays on the bid lot (dimmed)
+    if floodMode then floodAnchor = floodAnchor + FLOOD_LOCK; RefreshBidLock() end  -- consume 1 token
     ScrollToItem(target); UpdateTable()
 end
 
@@ -989,11 +994,30 @@ local function PollGetAllReady()
     tick()
 end
 
-local function ShowCB()
-    if not content then return end
+-- Hide the previous tab's panel so its dark background doesn't linger behind our
+-- partly-transparent filter row. Hides the 3 default panels AND any other LARGE
+-- child panel (e.g. an Auctioneer/Auctionator tab frame). The frame's stone art is
+-- a texture (not a child frame), and the tab buttons / close button are small, so
+-- they are left untouched.
+local function HideOtherAHFrames()
     if AuctionFrameBrowse then AuctionFrameBrowse:Hide() end
     if AuctionFrameBid then AuctionFrameBid:Hide() end
     if AuctionFrameAuctions then AuctionFrameAuctions:Hide() end
+    for _, c in ipairs({ AuctionFrame:GetChildren() }) do
+        if c ~= content and c.IsShown and c:IsShown()
+           and c.IsObjectType and c:IsObjectType("Frame") then
+            local nm = c.GetName and c:GetName()
+            if not (nm and nm:find("AuctionFrameTab"))
+               and (c:GetWidth() or 0) > 200 and (c:GetHeight() or 0) > 200 then
+                c:Hide()
+            end
+        end
+    end
+end
+
+local function ShowCB()
+    if not content then return end
+    HideOtherAHFrames()
     content:Show()
     BuildTable()
     if not fauxScroll then C_Timer.After(0.05, BuildTable) end
@@ -1003,6 +1027,8 @@ local function ShowCB()
     end
     if myTabID then PanelTemplates_SetTab(AuctionFrame, myTabID) end
     PollGetAllReady()                       -- light up "scan auc" green when GetAll is available
+    -- re-hide next frame in case the default/other addon re-showed its panel after us
+    C_Timer.After(0, function() if content and content:IsShown() then HideOtherAHFrames() end end)
 end
 local function HideCB() if content then content:Hide() end end
 
@@ -1029,6 +1055,8 @@ ev:RegisterEvent("ADDON_LOADED")
 ev:RegisterEvent("AUCTION_HOUSE_SHOW")
 ev:RegisterEvent("AUCTION_HOUSE_CLOSED")
 ev:RegisterEvent("AUCTION_ITEM_LIST_UPDATE")
+pcall(ev.RegisterEvent, ev, "AUCTION_BIDDER_LIST_UPDATE")   -- Bids tab (guarded: name varies by client)
+pcall(ev.RegisterEvent, ev, "AUCTION_OWNED_LIST_UPDATE")    -- Auctions tab
 
 ev:SetScript("OnEvent", function(_, event, arg1, arg2)
     if event == "ADDON_LOADED" and arg1 == ADDON_NAME then
@@ -1036,13 +1064,13 @@ ev:SetScript("OnEvent", function(_, event, arg1, arg2)
         print("|cff00cc00[CheapBids]|r loaded. IMPORTANT: disable Auctioneer/Auctionator to bid.")
     elseif event == "AUCTION_HOUSE_SHOW" then
         CreateTab()
+        floodMode = false; floodAnchor = 0; prevErrAt = 0   -- fresh AH session -> exit flood mode
         ev:RegisterEvent("CHAT_MSG_SYSTEM")
         ev:RegisterEvent("UI_ERROR_MESSAGE")
     elseif event == "AUCTION_HOUSE_CLOSED" then
         if isScanning or scanMode then FinishScan() end
         cacheFromGetAll = false; scanMode = nil; HideProgress()
         pending = {}; bidWatch = bidWatch + 1
-        focusItem = nil; focusReady = false; focusQuerying = false
         ev:UnregisterEvent("CHAT_MSG_SYSTEM")
         ev:UnregisterEvent("UI_ERROR_MESSAGE")
     elseif event == "CHAT_MSG_SYSTEM" then
@@ -1062,12 +1090,12 @@ ev:SetScript("OnEvent", function(_, event, arg1, arg2)
             ProcessGetAll(1, total)
         elseif scanMode == "page" then PageScanUpdate()
         else
-            if focusQuerying then
-                focusQuerying = false; focusReady = true     -- focused list ready
-                if actFS and focusItem then actFS:SetText("Ready - press bid for " .. ItemName(focusItem)) end
-            end
             if #pending > 0 then ReconcileBids() end          -- snapshot changed after a bid -> confirm
         end
+    elseif event == "AUCTION_BIDDER_LIST_UPDATE" or event == "AUCTION_OWNED_LIST_UPDATE" then
+        -- the default Bids/Auctions panel re-renders itself on these events; if OUR tab
+        -- is open, re-hide it so its dark background doesn't linger behind our filter row.
+        if content and content:IsShown() then HideOtherAHFrames() end
     end
 end)
 
@@ -1116,6 +1144,20 @@ SlashCmdList["CHEAPBIDS"] = function(arg)
         debugOn = not debugOn
         print("|cff00cc00[CheapBids]|r bid diagnostics: " .. (debugOn and "ON" or "off") ..
             ". Now place a bid normally and via CheapBids - compare the [CB debug] lines.")
+        return
+    end
+    if arg == "frames" then
+        -- dump every SHOWN child frame of AuctionFrame - run this while the leftover
+        -- background is visible to see exactly which panel is still showing.
+        print("|cffffcc00[CB frames]|r shown children of AuctionFrame:")
+        for _, c in ipairs({ AuctionFrame:GetChildren() }) do
+            if c.IsShown and c:IsShown() then
+                print(string.format("  %s  %dx%d  %s",
+                    tostring((c.GetName and c:GetName()) or "?"),
+                    math.floor(c:GetWidth() or 0), math.floor(c:GetHeight() or 0),
+                    tostring(c:GetObjectType())))
+            end
+        end
         return
     end
     if arg == "find" then
