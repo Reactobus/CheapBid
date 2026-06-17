@@ -47,7 +47,9 @@ local selectedItem = nil
 local sortKey, sortAsc = "bid", true
 
 -- times: which of the 4 legacy time-left buckets to show (all on by default)
+-- quality: nil = All rarities; 0..4 = show ONLY this rarity (Poor..Epic)
 local filter = { bidMin = 1, bidMax = 99, buyMin = nil, buyMax = nil,
+                 quality = nil,
                  times = { [1] = true, [2] = true, [3] = true, [4] = true } }
 
 -- UI refs
@@ -105,6 +107,12 @@ end
 local function TimeShown(code)
     if not code then return true end            -- unknown bucket -> always show
     return filter.times[code] ~= false
+end
+
+-- rarity filter: nil = All; otherwise the lot's quality must match exactly (0..4)
+local function QualityShown(qual)
+    if filter.quality == nil then return true end
+    return qual == filter.quality
 end
 
 local function FilterDesc()
@@ -194,7 +202,7 @@ local function UpdateButtons()
     local locked = floodMode and now > 0 and now < floodAnchor + FLOOD_LOCK   -- no bid earned yet
     if bidBtn    then bidBtn:SetEnabled(#cheapItems > 0 and idle and not locked) end
     if stopBtn   then stopBtn:SetEnabled(isScanning) end
-    if scanBtn   then scanBtn:SetText(isScanning and "Stop" or SCAN_BTN) end
+    if scanBtn   then scanBtn:SetText(isScanning and "stop" or SCAN_BTN) end
 end
 
 -- flood-mode token bucket: 1 bid is earned per FLOOD_LOCK seconds since floodAnchor,
@@ -250,7 +258,7 @@ local function ApplyFilter()
     ReadFilter()
     cheapItems = {}
     for _, it in ipairs(scanCache) do
-        if not it.done and not it.led and TimeShown(it.timeLeft) and PassesFilter(it.bid, it.buyout) then cheapItems[#cheapItems + 1] = it end
+        if not it.done and not it.led and TimeShown(it.timeLeft) and QualityShown(it.qual) and PassesFilter(it.bid, it.buyout) then cheapItems[#cheapItems + 1] = it end
     end
     SortItems()
     selectedItem = nil
@@ -308,7 +316,7 @@ local function ReadIndexInto(cache, i, storeIdx)
         if not itemID or itemID == 0 then return end
     end
     cache[#cache + 1] = {
-        name = name or "", tex = tex, cnt = cnt or 1,
+        name = name or "", tex = tex, cnt = cnt or 1, qual = qual,
         bid = CalcBid(minBid, minInc, bidAmt), buyout = buyout or 0,
         timeLeft = GetAuctionItemTimeLeft("list", i),   -- 1<30m 2:30m-2h 3:2-12h 4:>12h
         itemID = itemID, idx = storeIdx and i or nil,
@@ -339,7 +347,7 @@ local function AbortScan()
     UpdateButtons()
 end
 
-local GETALL_BATCH = 5000
+local GETALL_BATCH = 10000       -- lots processed per frame: bigger = faster scan, more per-frame lag
 local function ProcessGetAll(start, total)
     if scanMode ~= "getall" then return end
     local stop = math.min(start + GETALL_BATCH - 1, total)
@@ -873,17 +881,21 @@ local function BuildUI()
     leftCol:SetWidth(170)                                          -- shrink so the right edge stays put
     if leftCol.SetBackdrop then leftCol:SetBackdrop(PANEL_BACKDROP); leftCol:SetBackdropColor(0,0,0,0.55); leftCol:SetBackdropBorderColor(0.45,0.45,0.45) end
 
+    -- 4 buttons in a 2x2 grid, each ~half the old width, to free vertical space:
+    --   [ scan auc ] [ search ]
+    --   [   bid    ] [ cancel ]
+    local BTN_W, BTN_H = 75, 24
     scanBtn = CreateFrame("Button", nil, leftCol, "UIPanelButtonTemplate")
-    scanBtn:SetSize(154, 26); scanBtn:SetPoint("TOP", leftCol, "TOP", 0, -8); scanBtn:SetText(SCAN_BTN)
+    scanBtn:SetSize(BTN_W, BTN_H); scanBtn:SetPoint("TOPLEFT", leftCol, "TOPLEFT", 8, -8); scanBtn:SetText(SCAN_BTN)
     searchBtn = CreateFrame("Button", nil, leftCol, "UIPanelButtonTemplate")
-    searchBtn:SetSize(154, 24); searchBtn:SetPoint("TOP", scanBtn, "BOTTOM", 0, -6); searchBtn:SetText("search"); searchBtn:SetEnabled(false)
+    searchBtn:SetSize(BTN_W, BTN_H); searchBtn:SetPoint("LEFT", scanBtn, "RIGHT", 4, 0); searchBtn:SetText("search"); searchBtn:SetEnabled(false)
     bidBtn = CreateFrame("Button", nil, leftCol, "UIPanelButtonTemplate")
-    bidBtn:SetSize(154, 24); bidBtn:SetPoint("TOP", searchBtn, "BOTTOM", 0, -6); bidBtn:SetText("bid"); bidBtn:SetEnabled(false)
+    bidBtn:SetSize(BTN_W, BTN_H); bidBtn:SetPoint("TOPLEFT", scanBtn, "BOTTOMLEFT", 0, -6); bidBtn:SetText("bid"); bidBtn:SetEnabled(false)
     stopBtn = CreateFrame("Button", nil, leftCol, "UIPanelButtonTemplate")
-    stopBtn:SetSize(154, 22); stopBtn:SetPoint("TOP", bidBtn, "BOTTOM", 0, -6); stopBtn:SetText("cancel"); stopBtn:SetEnabled(false)
+    stopBtn:SetSize(BTN_W, BTN_H); stopBtn:SetPoint("LEFT", bidBtn, "RIGHT", 4, 0); stopBtn:SetText("cancel"); stopBtn:SetEnabled(false)
 
     progBar = CreateFrame("StatusBar", nil, leftCol)
-    progBar:SetSize(154, 14); progBar:SetPoint("TOPLEFT", stopBtn, "BOTTOMLEFT", 0, -12)
+    progBar:SetSize(154, 14); progBar:SetPoint("TOPLEFT", bidBtn, "BOTTOMLEFT", 0, -12)
     progBar:SetStatusBarTexture("Interface\\TargetingFrame\\UI-StatusBar"); progBar:SetStatusBarColor(0.2,0.6,1.0)
     progBar:SetMinMaxValues(0, 1); progBar:SetValue(0)
     local pbBg = progBar:CreateTexture(nil, "BACKGROUND"); pbBg:SetAllPoints(); pbBg:SetColorTexture(0,0,0,0.5)
@@ -942,6 +954,55 @@ local function BuildUI()
     statusFS:SetJustifyH("LEFT"); statusFS:SetWordWrap(true)
     statusFS:SetText("Disable Auctioneer/Auctionator! scan auc -> filter -> search -> bid.")
 
+    -- rarity filter: a Browse-tab-style dropdown directly UNDER the status line.
+    -- Picking a rarity re-runs the filter automatically, exactly like the time
+    -- checkboxes, so the table shows only lots of the chosen rarity.
+    local rarityHdr = content:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    rarityHdr:SetPoint("TOPLEFT", mBidMax.last, "TOPRIGHT", 16, -26)   -- the dropdown is anchored to this label, so it follows
+    rarityHdr:SetText("Rarity:")
+
+    local RARITY_OPTS = {
+        { text = "All",      value = -1 },   -- -1 sentinel: dropdowns can't key on nil
+        { text = "Poor",     value = 0 },
+        { text = "Common",   value = 1 },
+        { text = "Uncommon", value = 2 },
+        { text = "Rare",     value = 3 },
+        { text = "Epic",     value = 4 },
+    }
+    local function RarityText(value)
+        for _, o in ipairs(RARITY_OPTS) do
+            if o.value == value then
+                local col = QCOLOR[value]                       -- color like the rarity itself
+                return col and ("|cff" .. col .. o.text .. "|r") or o.text
+            end
+        end
+        return "All"
+    end
+
+    local rarityDD = CreateFrame("Frame", "CheapBidsRarityDD", content, "UIDropDownMenuTemplate")
+    rarityDD:SetPoint("LEFT", rarityHdr, "RIGHT", -8, -2)   -- to the RIGHT of the label (-8 trims the menu's left chrome)
+    local function RarityOnClick(self)
+        UIDropDownMenu_SetSelectedValue(rarityDD, self.value)
+        UIDropDownMenu_SetText(rarityDD, RarityText(self.value))
+        -- NOT `(v==-1) and nil or v`: that idiom returns v when the result is nil,
+        -- so "All" would set quality=-1 (matches nothing) instead of nil (matches all)
+        if self.value == -1 then filter.quality = nil else filter.quality = self.value end
+        RequestApplyFilter()                                    -- same path the time checkboxes use
+    end
+    UIDropDownMenu_Initialize(rarityDD, function()
+        for _, opt in ipairs(RARITY_OPTS) do
+            local info = UIDropDownMenu_CreateInfo()
+            info.text = RarityText(opt.value)
+            info.value = opt.value
+            info.func = RarityOnClick
+            info.checked = (filter.quality == nil and opt.value == -1) or (filter.quality == opt.value)
+            UIDropDownMenu_AddButton(info)
+        end
+    end)
+    UIDropDownMenu_SetWidth(rarityDD, 90)
+    UIDropDownMenu_SetSelectedValue(rarityDD, -1)
+    UIDropDownMenu_SetText(rarityDD, RarityText(-1))
+
     scanBtn:SetScript("OnClick", function()
         if isScanning then AbortScan(); return end
         if not (AuctionFrame and AuctionFrame:IsVisible()) then return end
@@ -982,7 +1043,7 @@ local function PollGetAllReady()
                 local last = (CheapBidsDB and CheapBidsDB.lastGetAll) or 0
                 local left = last > 0 and (GETALL_COOLDOWN - (time() - last)) or 0
                 if left > 0 then
-                    scanBtn:SetText(string.format("%s  %d:%02d", SCAN_BTN, math.floor(left / 60), left % 60))
+                    scanBtn:SetText(string.format("scan %d:%02d", math.floor(left / 60), left % 60))  -- compact: narrow button
                 else
                     scanBtn:SetText(SCAN_BTN)                            -- estimate elapsed, server still gating
                 end
@@ -1139,7 +1200,33 @@ end
 SLASH_CHEAPBIDS1 = "/cb"
 SLASH_CHEAPBIDS2 = "/cheapbids"
 SlashCmdList["CHEAPBIDS"] = function(arg)
-    arg = (arg or ""):lower():gsub("%s", "")
+    local raw = (arg or ""):lower()
+    arg = raw:gsub("%s", "")
+    -- /cb check <name>: search the EXISTING scan cache (no rescan) for an item and
+    -- show why it is (not) in the filtered results: bid/buyout/led/done + which
+    -- filter it fails. led=1 means we stored it as "you lead it" (field 12 high).
+    local checkName = raw:match("^%s*check%s+(.+)$")
+    if checkName then
+        checkName = checkName:gsub("%s+$", "")
+        if #scanCache == 0 then print("|cffffcc00[CB check]|r no scan yet - run scan auc first.") return end
+        ReadFilter()
+        local n, shown = 0, 0
+        for _, it in ipairs(scanCache) do
+            local nm = (it.name or ""):lower()
+            if nm ~= "" and nm:find(checkName, 1, true) then
+                n = n + 1
+                if shown < 12 then
+                    shown = shown + 1
+                    print(string.format("|cffffcc00[CB check]|r %s | bid=%s buy=%s led=%s done=%s | passBid=%s passTime=%s",
+                        tostring(it.name), tostring(it.bid), tostring(it.buyout),
+                        tostring(it.led and 1 or 0), tostring(it.done and 1 or 0),
+                        tostring(PassesFilter(it.bid, it.buyout)), tostring(TimeShown(it.timeLeft))))
+                end
+            end
+        end
+        print(string.format("|cffffcc00[CB check]|r '%s': %d match(es) in cache (%d shown)", checkName, n, shown))
+        return
+    end
     if arg == "debug" then
         debugOn = not debugOn
         print("|cff00cc00[CheapBids]|r bid diagnostics: " .. (debugOn and "ON" or "off") ..
