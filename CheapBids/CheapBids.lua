@@ -46,6 +46,13 @@ local uiBuilt, myTabID = false, nil
 local selectedItem = nil
 local sortKey, sortAsc = "bid", true
 
+local myBids = {}                    -- live "bidder" list: every auction I currently bid on
+local viewMode = "scan"              -- "scan" = scan results | "bids" = live my-bids view
+local bidsPollToken = 0              -- cancels the my-bids auto-refresh ticker when the view / AH closes
+local alwaysRedTarget = true         -- my-bids: keep the highlight on OUTBID (red) lots only (checkbox, default ON)
+local autoScanBids = true            -- my-bids: auto-refresh outbid lots into the table 1/s (checkbox, default ON)
+local bidsDismissed = {}             -- my-bids: lots right-clicked to hide (keyed by _key); reset on entry
+
 -- times: which of the 4 legacy time-left buckets to show (all on by default)
 -- quality: nil = All rarities; 0..4 = show ONLY this rarity (Poor..Epic)
 local filter = { bidMin = 1, bidMax = 99, buyMin = nil, buyMax = nil,
@@ -54,7 +61,7 @@ local filter = { bidMin = 1, bidMax = 99, buyMin = nil, buyMax = nil,
 
 -- UI refs
 local content, leftCol, listFrame, statusFS, actFS, foundFS, cacheFS, progBar
-local scanBtn, searchBtn, bidBtn, stopBtn
+local scanBtn, searchBtn, bidBtn, stopBtn, myBidsBtn
 local mBidMin, mBidMax, mBuyMin, mBuyMax
 local fauxScroll, tableRows, headerArrows = nil, {}, {}
 local NUM_ROWS = 0
@@ -76,6 +83,12 @@ local function FormatMoney(copper)
     return t
 end
 
+-- Lots whose effective bid is above this need an explicit player confirm AND are NEVER
+-- auto-targeted by the bid-spam advance - only a manual row click lands on one. Defined
+-- early: UpdateButtons and the auto-target helpers below all reference it.
+local BID_CONFIRM_COPPER = 5 * 10000        -- 5g
+local function IsBig(it) return it and (it.bid or 0) > BID_CONFIRM_COPPER end
+
 local function BoxNum(e) local x = e:GetText(); if not x or x == "" then return 0 end return tonumber(x) or 0 end
 local function MoneyCopper(w) return BoxNum(w.g)*10000 + BoxNum(w.s)*100 + BoxNum(w.c) end
 local function MoneyHasValue(w) return w.g:GetText() ~= "" or w.s:GetText() ~= "" or w.c:GetText() ~= "" end
@@ -86,6 +99,7 @@ local function CalcBid(minBid, minInc, bidAmt)
 end
 
 local function ReadFilter()
+    if not mBidMin then return end          -- UI not built (headless test): keep the set filter
     filter.bidMin = MoneyCopper(mBidMin)
     filter.bidMax = MoneyHasValue(mBidMax) and MoneyCopper(mBidMax) or nil
     filter.buyMin = MoneyHasValue(mBuyMin) and MoneyCopper(mBuyMin) or nil
@@ -147,7 +161,7 @@ local function ItemName(it)
         if n then return n end
     end
     if it.name and it.name ~= "" then return it.name end
-    return "|cff888888(loading…)|r"
+    return "|cff888888(loading...)|r"
 end
 
 -- ===== Throttled query =====
@@ -182,8 +196,11 @@ end
 
 -- ===== Table =====
 
+-- which list the table currently shows: scan results or the my-bids view
+local function ActiveList() return viewMode == "bids" and myBids or cheapItems end
+
 local function SortItems()
-    table.sort(cheapItems, function(a, b)
+    table.sort(ActiveList(), function(a, b)
         local va, vb
         if sortKey == "name" then va, vb = (a.name or ""), (b.name or "")
         elseif sortKey == "cnt" then va, vb = a.cnt, b.cnt
@@ -209,14 +226,28 @@ local function TimeLeftText(code) return TIME_LABEL[code or 0] or "-" end
 local function UpdateButtons()
     if not uiBuilt then return end
     local idle = not isScanning
+    local bidsView = viewMode == "bids"
     cacheFS:SetText("Cache: " .. #scanCache)
-    foundFS:SetText("Found: " .. #cheapItems)
-    if searchBtn then searchBtn:SetEnabled(#scanCache > 0 and idle) end
+    foundFS:SetText("Found: " .. (bidsView and #myBids or #cheapItems))
+    if myBidsBtn then myBidsBtn:SetText(bidsView and "to scan" or "my bids") end
+    if searchBtn then searchBtn:SetEnabled(not bidsView and #scanCache > 0 and idle) end
     local now = GetTime and GetTime() or 0
     local locked = floodMode and now > 0 and now < floodAnchor + FLOOD_LOCK   -- no bid earned yet
-    if bidBtn    then bidBtn:SetEnabled(#cheapItems > 0 and idle and not locked) end
-    if stopBtn   then stopBtn:SetEnabled(isScanning) end
-    if scanBtn   then scanBtn:SetText(isScanning and "stop" or SCAN_BTN) end
+    if bidBtn then
+        if bidsView then
+            -- enabled only when a RED (outbid) lot is the effective bid target (green = no point)
+            local t = selectedItem
+            if alwaysRedTarget and (not t or t.led) then
+                t = nil
+                for _, v in ipairs(myBids) do if not v.led and not IsBig(v) then t = v; break end end  -- never auto-pick a >5g lot
+            end
+            bidBtn:SetEnabled(t ~= nil and not t.led and idle and not locked)
+        else
+            bidBtn:SetEnabled(#cheapItems > 0 and idle and not locked)
+        end
+    end
+    if stopBtn then stopBtn:SetEnabled(isScanning) end
+    if scanBtn then scanBtn:SetText(isScanning and "stop" or SCAN_BTN) end
 end
 
 -- flood-mode token bucket: 1 bid is earned per FLOOD_LOCK seconds since floodAnchor,
@@ -238,13 +269,15 @@ local function UpdateTable()
     if not uiBuilt then return end
     UpdateButtons()
     if not fauxScroll then return end
-    local total = #cheapItems
+    local list = ActiveList()
+    local bidsView = viewMode == "bids"
+    local total = #list
     FauxScrollFrame_Update(fauxScroll, total, NUM_ROWS, ROW_H)
     local offset = FauxScrollFrame_GetOffset(fauxScroll)
     for i = 1, NUM_ROWS do
         local row = tableRows[i]
         if not row then break end
-        local it = cheapItems[i + offset]
+        local it = list[i + offset]
         if it then
             row.item = it
             local ic = it.tex
@@ -253,11 +286,20 @@ local function UpdateTable()
                 if instTex then ic = instTex end
             end
             row.icon:SetTexture(ic or 134400)
-            row.nameFS:SetText(ItemName(it))
             row.cntFS:SetText(it.cnt and it.cnt > 1 and tostring(it.cnt) or "1")
-            row.bidFS:SetText(FormatMoney(it.bid))
             row.buyFS:SetText(it.buyout > 0 and FormatMoney(it.buyout) or "-")
-            row.timeFS:SetText(TimeLeftText(it.timeLeft))
+            if bidsView then
+                -- my-bids: status by name color (green = leading, red = OUTBID)
+                row.nameFS:SetText((it.name and it.name ~= "" and it.name) or ItemName(it))
+                if it.led then row.nameFS:SetTextColor(0.35, 1, 0.35) else row.nameFS:SetTextColor(1, 0.4, 0.4) end
+                row.bidFS:SetText(FormatMoney(it.bid))
+                row.timeFS:SetText(TimeLeftText(it.timeLeft))
+            else
+                row.nameFS:SetText(ItemName(it))
+                row.nameFS:SetTextColor(1, 1, 1)
+                row.bidFS:SetText(FormatMoney(it.bid))
+                row.timeFS:SetText(TimeLeftText(it.timeLeft))
+            end
             if it == selectedItem then row.sel:Show() else row.sel:Hide() end
             row:SetAlpha(attempted[it] and 0.5 or 1)
             row:Show()
@@ -270,6 +312,7 @@ end
 
 local function ApplyFilter()
     ReadFilter()
+    viewMode = "scan"                -- any filter/search returns to the scan results view
     cheapItems = {}
     for _, it in ipairs(scanCache) do
         if not it.done and not it.led and TimeShown(it.timeLeft) and PassesFilter(it.bid, it.buyout) and QualityShown(it) then cheapItems[#cheapItems + 1] = it end
@@ -297,7 +340,7 @@ end
 -- index of a lot in the (small) filtered list, or nil
 local function IndexOf(it)
     if not it then return nil end
-    for i, v in ipairs(cheapItems) do if v == it then return i end end
+    for i, v in ipairs(ActiveList()) do if v == it then return i end end
     return nil
 end
 
@@ -340,6 +383,77 @@ local function ReadIndexInto(cache, i, storeIdx)
     }
 end
 
+-- ===== Diagnostic: is the GetAll snapshot ordered by REAL expiry? =====
+-- The server hands us only a coarse bucket per lot (1=<30m .. 4=>12h), never exact
+-- minutes. BUT if the snapshot itself arrives sorted by real expiry, then a lot's
+-- POSITION in the snapshot (it.idx) is a finer "who dies first" proxy than the 4
+-- buckets - which is exactly what the Bids tab shows when you sort it (that sort is
+-- server-side, on the true time). This checks whether OUR GetAll snapshot has the
+-- same property: for each bucket it reports how tightly its lots cluster in idx
+-- space. density ~1.00 = one solid contiguous block = snapshot is time-sorted ->
+-- within that block idx = true expiry order -> we CAN rank finer than the bucket.
+-- density near the bucket's share-of-list = scattered = idx tells us nothing about
+-- time. Runs on the EXISTING snapshot: no rescan, no extra GetAll cooldown.
+local function TimeOrderDiag()
+    local n = #scanCache
+    if n == 0 then
+        print("|cffffcc00[CB time]|r no scan in cache - run \"scan auc\" first.")
+        return
+    end
+    if not cacheFromGetAll then
+        print("|cffffcc00[CB time]|r cache is from a PAGE scan (no snapshot idx) - cannot analyze time order. Do a GetAll \"scan auc\".")
+        return
+    end
+    local LABEL = { [1] = "<30m", [2] = "30m-2h", [3] = "2-12h", [4] = ">12h" }
+    local cnt, lo, hi = {}, {}, {}
+    local nilTL, valid = 0, 0
+    local asc, desc, eq = 0, 0, 0
+    local prev
+    for k = 1, n do
+        local it = scanCache[k]
+        local t, p = it.timeLeft, it.idx        -- p = true snapshot position (has gaps from skipped empty slots)
+        if not t or not p then
+            nilTL = nilTL + 1
+        else
+            valid = valid + 1
+            cnt[t] = (cnt[t] or 0) + 1
+            if not lo[t] or p < lo[t] then lo[t] = p end
+            if not hi[t] or p > hi[t] then hi[t] = p end
+            if prev then
+                if t > prev then asc = asc + 1 elseif t < prev then desc = desc + 1 else eq = eq + 1 end
+            end
+            prev = t
+        end
+    end
+    print(string.format("|cff66ccff[CB time]|r snapshot=%d, usable=%d, no-timeLeft=%d. density 1.00 = one solid idx block = time-sorted:", n, valid, nilTL))
+    for b = 1, 4 do
+        local c = cnt[b] or 0
+        if c > 0 then
+            local span = hi[b] - lo[b] + 1
+            print(string.format("|cff66ccff[CB time]|r  %-7s count=%-6d idx[%d..%d] span=%-7d density=%.3f",
+                LABEL[b], c, lo[b], hi[b], span, c / span))
+        else
+            print(string.format("|cff66ccff[CB time]|r  %-7s count=0", LABEL[b]))
+        end
+    end
+    local steps = asc + desc + eq
+    print(string.format("|cff66ccff[CB time]|r adjacent steps: asc=%d desc=%d eq=%d  bucket-change rate=%.3f%s",
+        asc, desc, eq, steps == 0 and 0 or (asc + desc) / steps,
+        steps > 0 and (asc + desc) / steps < 0.02 and "  (rare changes -> globally time-sorted)" or ""))
+    -- VERDICT keyed on the <30m bucket - the one we actually want to rank within.
+    local c1 = cnt[1] or 0
+    if c1 > 1 then
+        local d1 = c1 / (hi[1] - lo[1] + 1)
+        local share = c1 / math.max(1, valid)          -- density expected if <30m lots were random
+        local verdict = d1 > 0.5 and "CLUSTERED -> idx IS a finer expiry order, we CAN rank within <30m"
+            or (d1 > share * 3 and "partly clustered -> weak signal, maybe usable")
+            or "SCATTERED -> idx is NOT a time proxy, cannot refine the bucket"
+        print(string.format("|cffffcc00[CB time]|r VERDICT(<30m): density=%.3f vs random-share=%.3f -> %s", d1, share, verdict))
+    else
+        print("|cffffcc00[CB time]|r VERDICT(<30m): too few <30m lots in snapshot to judge - rescan when more are ending.")
+    end
+end
+
 -- ===== Scan =====
 
 local StartPageScan
@@ -361,24 +475,26 @@ local function AbortScan()
     UpdateButtons()
 end
 
-local GETALL_BATCH = 10000       -- lots processed per frame: bigger = faster scan, more per-frame lag
+local GETALL_BATCH = 1000        -- lots processed per frame: bigger = faster scan, more per-frame lag
 local function ProcessGetAll(start, total)
     if scanMode ~= "getall" then return end
     local stop = math.min(start + GETALL_BATCH - 1, total)
     for i = start, stop do ReadIndexInto(scanCache, i, true) end
     if stop < total then
         SetProgress(0.1 + 0.9 * stop / total)
-        statusFS:SetText(string.format("Processing %d/%d…", stop, total))
+        statusFS:SetText(string.format("Processing %d/%d...", stop, total))
         C_Timer.After(0, function() ProcessGetAll(stop + 1, total) end)
     else
         isScanning = false; getAllPending = false; scanMode = nil
         cacheFromGetAll = true; HideProgress()
         statusFS:SetText(string.format("Scan done: %d lots. Filter -> search -> bid.", #scanCache))
+        if debugOn then TimeOrderDiag() end           -- auto time-order check while we have a fresh snapshot
         ApplyFilter()
     end
 end
 
 local function StartScan()
+    viewMode = "scan"
     local _, canAll = CanSendAuctionQuery()
     if not canAll then
         local last = (CheapBidsDB and CheapBidsDB.lastGetAll) or 0
@@ -406,7 +522,7 @@ local function StartScan()
     if not ITEM_QUALITY_COLORS[-1] then ITEM_QUALITY_COLORS[-1] = { r=0, g=0, b=0 } end
     scanMode = "getall"; isScanning = true; getAllPending = true
     UpdateButtons()
-    SetProgress(0.05); statusFS:SetText("GetAll: downloading the whole auction house…")
+    SetProgress(0.05); statusFS:SetText("GetAll: downloading the whole auction house...")
     QueryAuctionItems("", nil, nil, 0, nil, nil, true, false, nil)
     C_Timer.After(90, function()
         if myToken == scanToken and scanMode == "getall" and getAllPending then
@@ -419,7 +535,7 @@ StartPageScan = function()
     cacheFromGetAll = false
     scanMode = "page"; scanPage = 0; scanTotalPages = 1; isScanning = true
     UpdateButtons()
-    SetProgress(0.01); statusFS:SetText("Page-by-page scan…")
+    SetProgress(0.01); statusFS:SetText("Page-by-page scan...")
     SafeQuery(function() QueryAuctionItems("", nil, nil, scanPage, nil, nil, false, false, nil) end)
 end
 
@@ -456,17 +572,20 @@ end
 -- (it can hold 200k+ items -> "script ran too long").
 local function RemoveItem(it)
     it.done = true
+    local list = ActiveList()                    -- cheapItems in scan view, myBids in the bids view
     local removedIdx
-    for i, v in ipairs(cheapItems) do if v == it then removedIdx = i; table.remove(cheapItems, i); break end end
+    for i, v in ipairs(list) do if v == it then removedIdx = i; table.remove(list, i); break end end
     -- when the removed lot was the highlighted one, ADVANCE the highlight to the
     -- lot now occupying that slot (or the new last lot) instead of clearing it -
     -- so on confirm the selection visibly walks down and the next bid continues
     -- from here rather than jumping back to the top of the list.
     if it == selectedItem then
-        if removedIdx and #cheapItems > 0 then
-            local nextIdx = removedIdx > #cheapItems and #cheapItems or removedIdx
-            selectedItem = cheapItems[nextIdx]
-            ScrollToItem(selectedItem)
+        if removedIdx and #list > 0 then
+            -- advance to the next NON->5g lot at/after the freed slot: the bid-spam
+            -- advance must never auto-land on an expensive lot (manual click only).
+            selectedItem = nil
+            for i = removedIdx, #list do if not IsBig(list[i]) then selectedItem = list[i]; break end end
+            if selectedItem then ScrollToItem(selectedItem) end
         else
             selectedItem = nil
         end
@@ -545,8 +664,9 @@ local function RejectOldest()
     if floodMode then floodAnchor = now; RefreshBidLock() end
     -- pull the highlight BACK to the rejected lot so the player retries IT, instead
     -- of letting rapid bids walk the target forward past lots the server bounced.
+    -- EXCEPT a >5g lot: never auto-target it, even to retry (manual re-click only).
     local ri, si = IndexOf(it), IndexOf(selectedItem)
-    if ri and (not si or ri < si) then selectedItem = it; ScrollToItem(it) end
+    if ri and not IsBig(it) and (not si or ri < si) then selectedItem = it; ScrollToItem(it) end
     if actFS then
         if floodMode then
             actFS:SetText(string.format("Server flood - now 1 bid / %.0fs (waiting banks bids). Placed: %d, rejected: %d.",
@@ -559,10 +679,6 @@ local function RejectOldest()
     UpdateTable()
 end
 
-local function NoSnapshot()
-    if actFS then actFS:SetText("Bidding unavailable: run a fresh \"scan auc\" (Auctioneer/Auctionator OFF).") end
-end
-
 -- client-side anti-spam: keep a minimum gap between EVERY bid-button action so an
 -- autoclicker can't drive the relocate-scan + table redraw fast enough to freeze
 -- the client. A real BID waits the full interval (it hits the server's flood
@@ -571,6 +687,25 @@ local BID_MIN_INTERVAL  = 0.3
 local SKIP_MIN_INTERVAL = 0.15
 local lastActionAt = 0          -- any action (bid OR skip) - the autoclicker/freeze gate
 local lastBidAt    = 0          -- real bids only - the server anti-spam gate
+
+-- The >5g confirm popup. Its Accept button is itself a HARDWARE EVENT, so PlaceAuctionBid
+-- still fires from a real click - exactly how the default UI confirms an expensive buyout.
+StaticPopupDialogs = StaticPopupDialogs or {}
+StaticPopupDialogs["CHEAPBIDS_CONFIRM_BID"] = {
+    text = "CheapBids: place a bid of %s on\n%s ?\n\n(over 5g - confirm needed)",
+    button1 = ACCEPT, button2 = CANCEL,
+    OnAccept = function(self, data)
+        data = data or (self and self.data)
+        if data and data.commit then data.commit() end
+    end,
+    timeout = 0, whileDead = true, hideOnEscape = true, showAlert = true, preferredIndex = 3,
+}
+
+-- show the >5g confirm for `it`/`amount`; run `commit` ONLY when the player accepts.
+local function ConfirmBig(it, amount, commit)
+    local dlg = StaticPopup_Show("CHEAPBIDS_CONFIRM_BID", FormatMoney(amount), ItemName(it), { commit = commit })
+    if dlg then dlg.data = { commit = commit } end       -- some clients pass data via self.data only
+end
 
 -- Place a real bid on ONE lot at a known live index. Must run inside a hardware
 -- event (button / double-click / key binding).
@@ -630,7 +765,7 @@ end
 local function NextUnattempted(fromIdx)
     for i = fromIdx, #cheapItems do
         local v = cheapItems[i]
-        if not attempted[v] then return v end
+        if not attempted[v] and not IsBig(v) then return v end   -- never auto-land on a >5g lot
     end
     return nil
 end
@@ -663,12 +798,211 @@ local function BidDebug(tag, it)
     end
 end
 
+-- ===== Layer A: "my bids" view (the live "bidder" list) =====
+-- Every auction WE currently have a bid on; GetAuctionItemInfo field 12 (high) =
+-- leading vs outbid. This is a SEPARATE server list from the GetAll "list"
+-- snapshot: reading/refreshing it is cheap (NO 15-min GetAll cooldown), never
+-- touches our scan snapshot, and we can re-bid straight from it.
+
+-- the first OUTBID (red) lot in the my-bids view (reds are sorted on top)
+local function FirstRed()
+    for _, it in ipairs(myBids) do if not it.led and not IsBig(it) then return it end end  -- skip >5g: never auto-targeted
+    return nil
+end
+
+local function ReadMyBids()
+    local selKey = selectedItem and selectedItem._key or nil   -- remember the highlight across the rebuild
+    local fresh = {}
+    local n = (GetNumAuctionItems and GetNumAuctionItems("bidder")) or 0
+    for i = 1, n do
+        local name, tex, cnt, qual, _, _, _, minBid, minInc, buyout, bidAmt, high, _, _, _, _, itemID =
+            GetAuctionItemInfo("bidder", i)
+        if name and name ~= "" then
+            local it = {
+                name = name, tex = tex, cnt = cnt or 1, qual = qual,
+                bid = CalcBid(minBid, minInc, bidAmt),     -- amount needed to (re)take the lead
+                buyout = buyout or 0,
+                timeLeft = GetAuctionItemTimeLeft("bidder", i),
+                itemID = itemID, idx = i, led = high or false,
+            }
+            -- stable identity for selection-preservation across refresh: NO owner (the
+            -- seller name resolves async and can flip nil<->name, which would lose the highlight)
+            it._key = tostring(itemID) .. ":" .. tostring(cnt or 1) .. ":" .. tostring(buyout or 0)
+            if not bidsDismissed[it._key] then fresh[#fresh + 1] = it end   -- right-clicked lots stay hidden
+
+        end
+    end
+    -- ORDER: outbid (red) first, then leading (green). Within each, SHORTEST time on
+    -- top - primary key is the time-left bucket (1=<30m .. 4=>12h), tiebreak is the
+    -- server's row order (true sub-bucket expiry from the one duration sort on entry).
+    -- table.sort is NOT stable in Lua 5.1, so carry an explicit _ord tiebreak.
+    for i, it in ipairs(fresh) do it._ord = i end
+    table.sort(fresh, function(a, b)
+        local la, lb = a.led and 1 or 0, b.led and 1 or 0
+        if la ~= lb then return la < lb end              -- outbid (0) above leading (1)
+        local ta, tb = a.timeLeft or 99, b.timeLeft or 99
+        if ta ~= tb then return ta < tb end              -- shorter time bucket first (<30m on top)
+        return a._ord < b._ord                           -- keep server true-time order within a bucket
+    end)
+    myBids = fresh
+    -- re-find the previously selected lot so an auto-refresh never yanks the highlight
+    selectedItem = nil
+    if selKey then
+        for _, it in ipairs(myBids) do if it._key == selKey then selectedItem = it; break end end
+    end
+    -- "always target red": if nothing red is selected, drop the highlight onto the top
+    -- outbid lot, so freshly-appeared reds get targeted automatically (press bid -> hits red)
+    if alwaysRedTarget and (not selectedItem or selectedItem.led) then selectedItem = FirstRed() end
+end
+
+-- ask the server for a fresh bidder list, sorted by REAL expiry (server-side sort
+-- = true order, finer than the 4 buckets). The reply lands in
+-- AUCTION_BIDDER_LIST_UPDATE, which re-reads + redraws.
+local function RefreshMyBids(silent, resort)
+    -- only sort server-side ON ENTRY: repeated SortAuctionItems calls can TOGGLE the
+    -- direction on some clients, which would flip the order every poll tick.
+    if resort then pcall(SortAuctionItems, "bidder", "duration") end
+    pcall(GetBidderAuctionItems)            -- async; AUCTION_BIDDER_LIST_UPDATE re-reads when it lands
+    ReadMyBids()
+    UpdateTable()                           -- keeps the current scroll offset (we never SetValue here)
+    if not silent and statusFS then statusFS:SetText(string.format(
+        "My bids: %d (red = OUTBID on top, green = leading), live by real time. Select a red lot -> bid to re-bid.", #myBids)) end
+end
+
+-- auto-refresh the my-bids view so freshly-outbid lots float up (red, on top) on
+-- their own. Silent = keep scroll + selection. Cancelled by bumping bidsPollToken.
+local function StartBidsPoll()
+    bidsPollToken = bidsPollToken + 1
+    local tk = bidsPollToken
+    local function tick()
+        if tk ~= bidsPollToken then return end
+        if viewMode ~= "bids" or not (content and content:IsShown()) then return end
+        if autoScanBids then RefreshMyBids(true) end    -- "autoscan bids" off -> ticker idles, no auto-feed
+        C_Timer.After(1, tick)
+    end
+    C_Timer.After(1, tick)
+end
+
+local function ToggleBidsView()
+    selectedItem = nil
+    if viewMode == "bids" then
+        viewMode = "scan"
+        bidsPollToken = bidsPollToken + 1                                    -- stop the auto-refresh ticker
+        UpdateTable()
+        if statusFS then statusFS:SetText("Scan view. scan auc -> filter -> search -> bid.") end
+    else
+        viewMode = "bids"
+        bidsDismissed = {}                      -- fresh session: show all bids again
+        pending = {}; bidWatch = bidWatch + 1   -- abort any in-flight scan reconcile (it must never target myBids)
+        local sb = _G["CheapBidsFauxScrollBar"]; if sb then sb:SetValue(0) end   -- a fresh view starts at the top
+        RefreshMyBids(false, true)                                               -- resort once to load true-time order
+        StartBidsPoll()
+    end
+end
+
+-- actually place a my-bids re-bid (small bid: called directly; >5g: from the confirm
+-- popup's Accept, still a hardware event). Advances the highlight + consumes a token.
+local function CommitBidderBid(target)
+    if not target then return end
+    local now = GetTime and GetTime() or 0
+    if now > 0 and (now - lastBidAt) < BID_MIN_INTERVAL then return end           -- server anti-spam gate
+    lastBidAt = now
+    PlaceAuctionBid("bidder", target.idx, target.bid)                            -- inside this click -> accepted
+    bidsSent = bidsSent + 1
+    if actFS then actFS:SetText(string.format("Re-bid: %s (%s). Sent %d.", ItemName(target), FormatMoney(target.bid), bidsSent)) end
+    -- drop this row and ADVANCE, bid landed or not, WITHOUT resetting scroll; with
+    -- "always target red" on, keep the next highlight on a red lot (skip greens).
+    RemoveItem(target)
+    if alwaysRedTarget and (not selectedItem or selectedItem.led) then selectedItem = FirstRed() end
+    if floodMode then floodAnchor = floodAnchor + FLOOD_LOCK; RefreshBidLock() end  -- consume a token
+    UpdateTable()
+end
+
+-- re-bid one outbid lot straight from the live bidder list. PlaceAuctionBid on the
+-- "bidder" list works from a real click, exactly like the native Bids tab button.
+local function RebidBidder(it)
+    local now = GetTime and GetTime() or 0
+    if now > 0 and (now - lastActionAt) < SKIP_MIN_INTERVAL then return end       -- debounce (anti-freeze)
+    lastActionAt = now
+    -- server flood lock (shared with scan): hold until a token is available
+    if floodMode and now > 0 and now < floodAnchor + FLOOD_LOCK then
+        if actFS then actFS:SetText(string.format("Server flood - next bid in %.1fs.", floodAnchor + FLOOD_LOCK - now)) end
+        return
+    end
+    local target = it or selectedItem
+    if alwaysRedTarget and (not target or target.led) then target = FirstRed() end -- never sit on / bid a green
+    if not target then
+        if actFS then actFS:SetText(alwaysRedTarget and "No outbid (red) lots to bid." or "No bids here - refresh with \"my bids\".") end
+        return
+    end
+    selectedItem = target
+    if target.led then                          -- green = leading: nothing to bid, do NOT remove it
+        if actFS then actFS:SetText(ItemName(target) .. " - already leading, nothing to bid.") end
+        UpdateTable()
+        return
+    end
+    if target.bid and target.bid > BID_CONFIRM_COPPER then    -- >5g: ask before placing
+        if actFS then actFS:SetText(string.format("Confirm re-bid of %s on %s (over 5g).", FormatMoney(target.bid), ItemName(target))) end
+        ConfirmBig(target, target.bid, function() CommitBidderBid(target) end)
+        return
+    end
+    CommitBidderBid(target)
+end
+
+-- a my-bids re-bid got "Internal auction error" (lot changed / server flood). Behave
+-- like the scan path: DON'T lose the lot (re-read the live bidder list, where a still-
+-- outbid lot reappears), and on a flood cluster lock the bid button (token bucket).
+local function RejectBidderBid()
+    local now = GetTime and GetTime() or 0
+    if now > 0 and (now - lastBidAt) > 6 then return end   -- not from one of our recent re-bids
+    bidsFail = bidsFail + 1
+    if not floodMode and prevErrAt > 0 and now > 0 and (now - prevErrAt) < FLOOD_WINDOW then floodMode = true end
+    prevErrAt = now
+    if floodMode then floodAnchor = now; RefreshBidLock() end
+    if actFS then
+        actFS:SetText(floodMode and string.format("Server flood - now 1 bid / %.0fs (waiting banks bids). Rejected %d.", FLOOD_LOCK, bidsFail)
+            or string.format("Bid rejected (lot changed) - retry. Rejected %d.", bidsFail))
+    end
+    RefreshMyBids(true)        -- restore the still-outbid lot + re-target a red
+end
+
+-- right-click a my-bids row: just REMOVE the lot from the list (player doesn't want
+-- to bid it), and remember it so the 1s autoscan does not re-add it.
+local function DismissRow(it)
+    if not it then return end
+    if viewMode == "bids" and it._key then bidsDismissed[it._key] = true end
+    RemoveItem(it)
+    if viewMode == "bids" and alwaysRedTarget and (not selectedItem or selectedItem.led) then selectedItem = FirstRed() end
+    UpdateTable()
+end
+
+-- actually place a scan-view bid on `target`. Re-locates the lot at COMMIT time (it can
+-- drift while a >5g confirm popup is open) and bids the corrected live index. Called
+-- directly for small bids, or from the confirm popup's Accept (also a hardware event).
+local function CommitScanBid(target)
+    if not target then return end
+    local now = GetTime and GetTime() or 0
+    local idx, eff, ledSeen = RelocateInLive(target)
+    if not idx then
+        if actFS then actFS:SetText(ItemName(target) ..
+            (ledSeen and " - you already lead this, removed." or " - item taken/unavailable, removed.")) end
+        RemoveItem(target); UpdateTable(); return
+    end
+    if now > 0 and (now - lastBidAt) < BID_MIN_INTERVAL then return end           -- server anti-spam gate
+    lastBidAt = now
+    target.idx = idx
+    PlaceOn(target, idx, eff)                           -- highlight stays on the bid lot (dimmed)
+    if floodMode then floodAnchor = floodAnchor + FLOOD_LOCK; RefreshBidLock() end  -- consume 1 token
+    ScrollToItem(target); UpdateTable()
+end
+
 -- Bid the SELECTED lot only. If that exact lot is gone from the live auction it
 -- is REMOVED from the list with an "unavailable" message and NO bid is placed on
 -- any other lot (asked for explicitly). Lots already bid are skipped, so repeated
 -- clicks walk down to the next fresh lot; the highlight stays on the bid lot.
 local function BidItem(it)
     if isScanning then return end
+    if viewMode == "bids" then RebidBidder(it); return end   -- my-bids view re-bids the live bidder list
     -- Gate the WHOLE action at the FASTER (skip) rate, so an autoclicker can't
     -- drive the relocate scan / table redraw fast enough to freeze us, while
     -- unavailable lots still clear quickly. A real bid additionally waits the
@@ -705,19 +1039,24 @@ local function BidItem(it)
         UpdateTable()
         return
     end
-    -- a real bid: also wait the full gap since the last actual bid (server anti-spam)
-    if now > 0 and (now - lastBidAt) < BID_MIN_INTERVAL then return end
-    lastBidAt = now
-    target.idx = idx
-    PlaceOn(target, idx, eff)                           -- highlight stays on the bid lot (dimmed)
-    if floodMode then floodAnchor = floodAnchor + FLOOD_LOCK; RefreshBidLock() end  -- consume 1 token
-    ScrollToItem(target); UpdateTable()
+    if eff > BID_CONFIRM_COPPER then                    -- >5g: never auto-place, ask first
+        if actFS then actFS:SetText(string.format("Confirm bid of %s on %s (over 5g).", FormatMoney(eff), ItemName(target))) end
+        ConfirmBig(target, eff, function() CommitScanBid(target) end)
+        return
+    end
+    CommitScanBid(target)                               -- small bid: place straight away
 end
 
 local function DoSingleBid()
     if not uiBuilt then return end          -- hotkey pressed before AH ever opened
     if isScanning then return end
-    if #cheapItems == 0 then if actFS then actFS:SetText("Run \"scan auc\" and search first.") end return end
+    if #ActiveList() == 0 then
+        if actFS then
+            actFS:SetText(viewMode == "bids" and "No bids found - press \"my bids\" to refresh."
+                or "Run \"scan auc\" and search first.")
+        end
+        return
+    end
     BidItem(selectedItem)
 end
 
@@ -764,6 +1103,7 @@ local PANEL_BACKDROP = {
 local C_BUY, C_BID, C_CNT, C_TIME = 96, 96, 38, 58
 
 local function SetSortColumn(key)
+    if viewMode == "bids" then return end               -- bids view is fixed: red (outbid) on top, green below
     if Throttled("sort", 0.2) then return end           -- header-spam guard (sorts up to ~4700)
     if sortKey == key then sortAsc = not sortAsc else sortKey = key; sortAsc = (key == "bid" or key == "name" or key == "time") end
     for k, ar in pairs(headerArrows) do
@@ -843,16 +1183,37 @@ local function BuildTable()
         local timeFS = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
         timeFS:SetPoint("RIGHT", r, "RIGHT", -2, 0); timeFS:SetWidth(C_TIME); timeFS:SetJustifyH("RIGHT")
         r.icon, r.nameFS, r.cntFS, r.bidFS, r.buyFS, r.timeFS, r.sel = icon, nameFS, cntFS, bidFS, buyFS, timeFS, sel
-        r:SetScript("OnClick", function(self)
-            if self.item then selectedItem = self.item; UpdateTable() end
+        r:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+        r:SetScript("OnClick", function(self, button)
+            if not self.item then return end
+            if button == "RightButton" then
+                if viewMode == "bids" then DismissRow(self.item) end   -- just remove, no bid
+                return
+            end
+            selectedItem = self.item
+            -- "always target red": clicking a green lot snaps the highlight to the top red
+            if viewMode == "bids" and alwaysRedTarget and (not selectedItem or selectedItem.led) then selectedItem = FirstRed() end
+            -- a >5g lot is never auto-targeted; picking it by hand is allowed but warned
+            if IsBig(selectedItem) and actFS then
+                actFS:SetText(string.format("WARNING: %s bid is %s (over 5g) - bid will ask to confirm.",
+                    ItemName(selectedItem), FormatMoney(selectedItem.bid or 0)))
+            end
+            UpdateTable()
         end)
-        r:SetScript("OnDoubleClick", function(self)
+        r:SetScript("OnDoubleClick", function(self, button)
+            if button == "RightButton" then return end
             if self.item then selectedItem = self.item; BidItem(self.item) end
         end)
         r:SetScript("OnEnter", function(self)
-            if self.item and self.item.link then
+            local it = self.item
+            if not it then return end
+            local link = it.link
+            if not link and it.itemID and it.itemID ~= 0 then
+                link = select(2, GetItemInfo(it.itemID)) or ("item:" .. it.itemID)   -- bids/old rows: link from itemID
+            end
+            if link then
                 GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-                GameTooltip:SetHyperlink(self.item.link); GameTooltip:Show()
+                GameTooltip:SetHyperlink(link); GameTooltip:Show()
             end
         end)
         r:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -908,6 +1269,35 @@ local function BuildUI()
     bidBtn:SetSize(BTN_W, BTN_H); bidBtn:SetPoint("TOPLEFT", scanBtn, "BOTTOMLEFT", 0, -6); bidBtn:SetText("bid"); bidBtn:SetEnabled(false)
     stopBtn = CreateFrame("Button", nil, leftCol, "UIPanelButtonTemplate")
     stopBtn:SetSize(BTN_W, BTN_H); stopBtn:SetPoint("LEFT", bidBtn, "RIGHT", 4, 0); stopBtn:SetText("cancel"); stopBtn:SetEnabled(false)
+
+    -- toggle: scan results  <->  my bids (live "bidder" list; re-bid outbid lots).
+    -- pinned to the bottom of the left panel so it never collides with the grid.
+    myBidsBtn = CreateFrame("Button", nil, leftCol, "UIPanelButtonTemplate")
+    myBidsBtn:SetSize(154, 22); myBidsBtn:SetPoint("BOTTOMLEFT", leftCol, "BOTTOMLEFT", 8, 8)
+    myBidsBtn:SetText("my bids")
+    myBidsBtn:SetScript("OnClick", ToggleBidsView)
+
+    -- my-bids options (both default ON)
+    local redCB = CreateFrame("CheckButton", nil, leftCol, "UICheckButtonTemplate")
+    redCB:SetSize(20, 20); redCB:SetPoint("BOTTOMLEFT", myBidsBtn, "TOPLEFT", 2, 6)
+    redCB:SetChecked(alwaysRedTarget)
+    local redLbl = redCB:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    redLbl:SetPoint("LEFT", redCB, "RIGHT", 1, 0); redLbl:SetText("Always target red")
+    redCB:SetScript("OnClick", function(self)
+        alwaysRedTarget = self:GetChecked() and true or false
+        if viewMode == "bids" and alwaysRedTarget then selectedItem = FirstRed() end
+        UpdateTable()
+    end)
+
+    local autoCB = CreateFrame("CheckButton", nil, leftCol, "UICheckButtonTemplate")
+    autoCB:SetSize(20, 20); autoCB:SetPoint("BOTTOMLEFT", redCB, "TOPLEFT", 0, 2)
+    autoCB:SetChecked(autoScanBids)
+    local autoLbl = autoCB:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    autoLbl:SetPoint("LEFT", autoCB, "RIGHT", 1, 0); autoLbl:SetText("Autoscan bids")
+    autoCB:SetScript("OnClick", function(self)
+        autoScanBids = self:GetChecked() and true or false
+        if viewMode == "bids" and autoScanBids then RefreshMyBids(true) end
+    end)
 
     progBar = CreateFrame("StatusBar", nil, leftCol)
     progBar:SetSize(154, 14); progBar:SetPoint("TOPLEFT", bidBtn, "BOTTOMLEFT", 0, -12)
@@ -1007,7 +1397,7 @@ local function BuildUI()
         -- filter pass above kicks those loads off, so re-run once they settle so
         -- freshly-resolved rarities are included.
         if filter.quality ~= nil then
-            C_Timer.After(0.8, function() if uiBuilt and not isScanning then ApplyFilter() end end)
+            C_Timer.After(0.8, function() if uiBuilt and not isScanning and viewMode == "scan" then ApplyFilter() end end)
         end
     end
     UIDropDownMenu_Initialize(rarityDD, function()
@@ -1143,6 +1533,7 @@ pcall(ev.RegisterEvent, ev, "AUCTION_OWNED_LIST_UPDATE")    -- Auctions tab
 ev:SetScript("OnEvent", function(_, event, arg1, arg2)
     if event == "ADDON_LOADED" and arg1 == ADDON_NAME then
         CheapBidsDB = CheapBidsDB or {}
+        CheapBidsDB.myBids = nil           -- drop the removed "old bids" saved record
         print("|cff00cc00[CheapBids]|r loaded. IMPORTANT: disable Auctioneer/Auctionator to bid.")
     elseif event == "AUCTION_HOUSE_SHOW" then
         CreateTab()
@@ -1152,6 +1543,7 @@ ev:SetScript("OnEvent", function(_, event, arg1, arg2)
     elseif event == "AUCTION_HOUSE_CLOSED" then
         if isScanning or scanMode then FinishScan() end
         cacheFromGetAll = false; scanMode = nil; HideProgress()
+        viewMode = "scan"; bidsPollToken = bidsPollToken + 1   -- stop the my-bids auto-refresh ticker
         pending = {}; bidWatch = bidWatch + 1
         ev:UnregisterEvent("CHAT_MSG_SYSTEM")
         ev:UnregisterEvent("UI_ERROR_MESSAGE")
@@ -1163,18 +1555,24 @@ ev:SetScript("OnEvent", function(_, event, arg1, arg2)
         end
     elseif event == "UI_ERROR_MESSAGE" then
         local msg = arg2 or arg1
-        if msg == AUC_ERR and #pending > 0 then RejectOldest() end   -- bid rejected (lot gone)
+        if msg == AUC_ERR then
+            if viewMode == "bids" then RejectBidderBid()             -- my-bids re-bid rejected -> restore + flood-lock
+            elseif #pending > 0 then RejectOldest() end              -- scan bid rejected (lot gone)
+        end
     elseif event == "AUCTION_ITEM_LIST_UPDATE" then
         if scanMode == "getall" and getAllPending then
             getAllPending = false
             local total = GetNumAuctionItems("list") or 0
-            SetProgress(0.1); statusFS:SetText("Received " .. total .. " lots, processing…")
+            SetProgress(0.1); statusFS:SetText("Received " .. total .. " lots, processing...")
             ProcessGetAll(1, total)
         elseif scanMode == "page" then PageScanUpdate()
         else
             if #pending > 0 then ReconcileBids() end          -- snapshot changed after a bid -> confirm
         end
     elseif event == "AUCTION_BIDDER_LIST_UPDATE" or event == "AUCTION_OWNED_LIST_UPDATE" then
+        if event == "AUCTION_BIDDER_LIST_UPDATE" and viewMode == "bids" then
+            ReadMyBids(); UpdateTable()                              -- fresh bidder data -> redraw my-bids view
+        end
         -- the default Bids/Auctions panel re-renders itself on these events; if OUR tab
         -- is open, re-hide it so its dark background doesn't linger behind our filter row.
         if content and content:IsShown() then HideOtherAHFrames() end
@@ -1248,6 +1646,25 @@ SlashCmdList["CHEAPBIDS"] = function(arg)
         print(string.format("|cffffcc00[CB check]|r '%s': %d match(es) in cache (%d shown)", checkName, n, shown))
         return
     end
+    if arg == "bids" then
+        -- dump the live "bidder" list so we can confirm the API + the leading/outbid field
+        pcall(GetBidderAuctionItems)
+        local n = (GetNumAuctionItems and GetNumAuctionItems("bidder")) or 0
+        print("|cffffcc00[CB bids]|r bidder count = " .. n .. " (if 0 but you have bids, run /cb bids again - it loads async)")
+        for i = 1, math.min(n, 25) do
+            local name, _, cnt, _, _, _, _, mb, mi, buy, ba, high = GetAuctionItemInfo("bidder", i)
+            print(string.format("|cffffcc00[CB bids]|r [%d] %s x%s | curBid=%s nextBid=%s buy=%s | %s | tl=%s",
+                i, tostring(name), tostring(cnt), tostring(ba), tostring(CalcBid(mb, mi, ba)),
+                tostring(buy), high and "LEADING" or "OUTBID", tostring(GetAuctionItemTimeLeft("bidder", i))))
+        end
+        return
+    end
+    if arg == "timediag" or arg == "time" then
+        -- analyze whether the EXISTING GetAll snapshot is ordered by real expiry
+        -- (so a lot's idx could rank finer than the 4 time buckets). No rescan.
+        TimeOrderDiag()
+        return
+    end
     if arg == "debug" then
         debugOn = not debugOn
         print("|cff00cc00[CheapBids]|r bid diagnostics: " .. (debugOn and "ON" or "off") ..
@@ -1314,4 +1731,43 @@ SlashCmdList["CHEAPBIDS"] = function(arg)
     end
     if myTabID and _G["AuctionFrameTab"..myTabID] then _G["AuctionFrameTab"..myTabID]:Click()
     else print("|cffff4444[CheapBids]|r Open the auction house first.") end
+end
+
+-- ===== Test hook =====
+-- No in-game effect: WoW never sets the CheapBidsTest global. The standalone test
+-- harness (tests/) sets _G.CheapBidsTest = {} BEFORE loading this file, then uses
+-- these to unit-test the REAL internal logic against a mocked WoW API.
+if CheapBidsTest then
+    CheapBidsTest.fn = {
+        CalcBid = CalcBid, PassesFilter = PassesFilter, TimeShown = TimeShown,
+        FirstRed = FirstRed, ReadMyBids = ReadMyBids, RefreshMyBids = RefreshMyBids,
+        RebidBidder = RebidBidder, RejectBidderBid = RejectBidderBid, DismissRow = DismissRow,
+        BidItem = BidItem, CommitScanBid = CommitScanBid,
+        ActiveList = ActiveList, SortItems = SortItems, UpdateButtons = UpdateButtons, ReadFilter = ReadFilter,
+    }
+    CheapBidsTest.set = function(k, v)
+        if k == "myBids" then myBids = v
+        elseif k == "scanCache" then scanCache = v
+        elseif k == "cheapItems" then cheapItems = v
+        elseif k == "viewMode" then viewMode = v
+        elseif k == "selectedItem" then selectedItem = v
+        elseif k == "alwaysRedTarget" then alwaysRedTarget = v
+        elseif k == "autoScanBids" then autoScanBids = v
+        elseif k == "bidsDismissed" then bidsDismissed = v
+        elseif k == "filter" then filter = v
+        elseif k == "sortKey" then sortKey = v
+        elseif k == "sortAsc" then sortAsc = v
+        elseif k == "isScanning" then isScanning = v
+        else error("CheapBidsTest.set: unknown key " .. tostring(k)) end
+    end
+    CheapBidsTest.get = function(k)
+        if k == "myBids" then return myBids
+        elseif k == "viewMode" then return viewMode
+        elseif k == "selectedItem" then return selectedItem
+        elseif k == "alwaysRedTarget" then return alwaysRedTarget
+        elseif k == "autoScanBids" then return autoScanBids
+        elseif k == "bidsDismissed" then return bidsDismissed
+        elseif k == "filter" then return filter
+        else error("CheapBidsTest.get: unknown key " .. tostring(k)) end
+    end
 end

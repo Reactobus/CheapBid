@@ -1,0 +1,2 @@
+# headless test deps (installed via `npm install` in tests/; not source)
+tests/node_modules/
