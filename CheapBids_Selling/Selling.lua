@@ -1,24 +1,22 @@
 -- ===========================================================================
 -- CheapBids Selling
 -- ---------------------------------------------------------------------------
--- A lean take on Auctionator's "Selling" tab: shift-click an item into the window and
--- it suggests a sell price that undercuts the item's market minimum by 1 copper (the
--- amount is tunable in the CheapBids options panel). The market minimum is the per-unit
--- price from CheapBids' last full GetAll (shared CheapBidsDB.priceDB) - i.e. exactly the
--- "scan the item on the AH" number Auctionator computes, without a second scan.
+-- A lean take on Auctionator's "Selling" tab: an extra tab in the auction house where you
+-- shift-click an item to get a suggested sell price that undercuts the item's market
+-- minimum by 1 copper (tunable in the CheapBids options panel). The market minimum is the
+-- per-unit price from CheapBids' last full GetAll (shared CheapBidsDB.priceDB) - i.e. the
+-- "scan the item on the AH" number, without a second scan.
 --
 -- SAFE BY DESIGN: this addon does NOT post auctions itself (no StartAuction, no deposit
--- risk from our code). The "Fill Auctions price" button only writes the suggested numbers
--- into Blizzard's OWN Start Price / Buyout money fields on the default Auctions tab; YOU
--- review them and click Blizzard's own "Create Auction". Nothing is posted without your
--- explicit click on Blizzard's button.
+-- risk from our code). "Fill Auctions price" only writes the suggested numbers into
+-- Blizzard's OWN Start/Buyout money fields on the default Auctions tab; you review them and
+-- click Blizzard's own "Create Auction". Nothing is posted without that click.
 --
--- Separate plug-in addon; shares only CheapBidsDB. Toggle window with /cbsell. The pure
--- price math is unit-tested headless. ASCII/English UI text.
+-- The tab is created like CheapBids' own tab. Shares only CheapBidsDB. /cbsell selects the
+-- tab. The pure price math is unit-tested headless. ASCII/English UI text.
 -- ===========================================================================
 
 -- ---- price math (pure, unit-tested) ---------------------------------------
--- market min per unit (copper) for an item from the shared price DB, or nil
 local function MarketUnit(itemID)
     local db = CheapBidsDB and CheapBidsDB.priceDB
     local p = itemID and db and db[itemID]
@@ -29,7 +27,6 @@ local function Undercut()
     local u = CheapBidsDB and CheapBidsDB.undercutCopper
     return (type(u) == "number" and u >= 0) and u or 1
 end
--- suggested PER-UNIT buyout = market min - undercut (never below 1c). nil if unpriced.
 local function SuggestUnit(itemID)
     local m = MarketUnit(itemID)
     if not m then return nil end
@@ -37,8 +34,6 @@ local function SuggestUnit(itemID)
     if p < 1 then p = 1 end
     return p
 end
-
--- ---- money text -----------------------------------------------------------
 local function Money(copper)
     if not copper or copper <= 0 then return "-" end
     local g = math.floor(copper / 10000)
@@ -47,123 +42,147 @@ local function Money(copper)
     local out = ""
     if g > 0 then out = out .. g .. "|cffffd700g|r " end
     if s > 0 then out = out .. s .. "|cffc7c7cfs|r " end
-    out = out .. c .. "|cffeda55fc|r"
-    return out
+    return out .. c .. "|cffeda55fc|r"
 end
 
--- ---- window ---------------------------------------------------------------
-local win
+-- ---- tab + content panel --------------------------------------------------
+local content, myTabID
+
 local function Update()
-    if not win then return end
-    local id = win.itemID
+    if not content then return end
+    local id = content.itemID
     if not id then
-        win.itemFS:SetText("|cff808080shift-click an item here|r")
-        win.marketFS:SetText(""); win.suggestFS:SetText(""); win.fill:Disable()
+        content.itemFS:SetText("|cff808080shift-click an item into the box above|r")
+        content.marketFS:SetText(""); content.suggestFS:SetText(""); content.fill:Disable()
         return
     end
     local name = GetItemInfo(id) or ("item:" .. id)
-    local market = MarketUnit(id)
+    content.itemFS:SetText(content.itemLink or name)
+    content.marketFS:SetText("Market min / unit: " .. Money(MarketUnit(id)))
     local unit = SuggestUnit(id)
-    win.itemFS:SetText(win.itemLink or name)
-    win.marketFS:SetText("Market min / unit: " .. Money(market))
     if unit then
-        win.suggestFS:SetText("Suggested / unit: |cff33ff99" .. Money(unit) .. "|r  (market - " .. Undercut() .. "c)")
-        win.fill:Enable()
+        content.suggestFS:SetText("Suggested / unit: |cff33ff99" .. Money(unit) .. "|r  (market - " .. Undercut() .. "c)")
+        content.fill:Enable()
     else
-        win.suggestFS:SetText("|cffff8080No scan data for this item - run a GetAll in CheapBids first.|r")
-        win.fill:Disable()
+        content.suggestFS:SetText("|cffff8080No scan data - run a GetAll in the CheapBids tab first.|r")
+        content.fill:Disable()
     end
 end
 
--- Fill Blizzard's OWN Start Price / Buyout fields (default Auctions tab) with the suggested
--- price for the WHOLE stack currently in Blizzard's sell slot. We never post - you click
--- Blizzard's Create Auction. If the slot is empty or holds a different item, we say so.
+-- Fill Blizzard's OWN Start/Buyout fields for the WHOLE stack currently in Blizzard's sell
+-- slot. We never post - you click Blizzard's Create Auction.
 local function FillBlizzardPrice()
-    local id = win and win.itemID
+    local id = content and content.itemID
     local unit = id and SuggestUnit(id)
     if not unit then return end
     local slotName, _, slotCount = GetAuctionSellItemInfo and GetAuctionSellItemInfo()
     if not slotName then
-        win.suggestFS:SetText("|cffff8080Put the item in Blizzard's Auctions sell slot first, then Fill.|r")
-        return
+        content.suggestFS:SetText("|cffff8080Put the item in Blizzard's Auctions sell slot first, then Fill.|r"); return
     end
     local myName = GetItemInfo(id)
     if myName and slotName and myName ~= slotName then
-        win.suggestFS:SetText("|cffff8080Sell slot holds '" .. slotName .. "', not '" .. myName .. "'.|r")
-        return
+        content.suggestFS:SetText("|cffff8080Sell slot holds '" .. slotName .. "', not '" .. myName .. "'.|r"); return
     end
     local stackTotal = unit * (slotCount or 1)
     if StartPrice and BuyoutPrice and MoneyInputFrame_SetCopper then
         MoneyInputFrame_SetCopper(StartPrice, stackTotal)
         MoneyInputFrame_SetCopper(BuyoutPrice, stackTotal)
-        win.suggestFS:SetText("|cff33ff99Filled Blizzard price: " .. Money(stackTotal) ..
-            " for x" .. (slotCount or 1) .. ". Review + click Create Auction.|r")
+        content.suggestFS:SetText("|cff33ff99Filled: " .. Money(stackTotal) .. " for x" .. (slotCount or 1) ..
+            ". Review + click Create Auction.|r")
     else
-        win.suggestFS:SetText("|cffff8080Open the Auctions tab (sell) first.|r")
+        content.suggestFS:SetText("|cffff8080Open Blizzard's Auctions (sell) tab first.|r")
     end
 end
 
 local function SetItem(itemID, itemLink)
-    if not win then return end
-    win.itemID = itemID; win.itemLink = itemLink
-    Update()
+    if not content then return end
+    content.itemID = itemID; content.itemLink = itemLink; Update()
 end
 
-local function BuildWindow()
-    local f = CreateFrame("Frame", "CheapBidsSellingWindow", UIParent, "BackdropTemplate")
-    f:SetSize(320, 190); f:SetPoint("CENTER")
-    f:SetBackdrop({ bgFile = "Interface/Tooltips/UI-Tooltip-Background",
-        edgeFile = "Interface/Tooltips/UI-Tooltip-Border", tile = true, tileSize = 16, edgeSize = 16,
-        insets = { left = 4, right = 4, top = 4, bottom = 4 } })
-    f:SetBackdropColor(0, 0, 0, 0.9)
-    f:SetMovable(true); f:EnableMouse(true); f:RegisterForDrag("LeftButton")
-    f:SetScript("OnDragStart", f.StartMoving); f:SetScript("OnDragStop", f.StopMovingOrSizing)
-    f:SetClampedToScreen(true)
-    if UISpecialFrames then tinsert(UISpecialFrames, "CheapBidsSellingWindow") end
+local function BuildContent()
+    if content or not AuctionFrame then return end
+    local f = CreateFrame("Frame", "CheapBidsSellContent", AuctionFrame)
+    f:SetPoint("TOPLEFT", AuctionFrame, "TOPLEFT", 8, -22)
+    f:SetPoint("BOTTOMRIGHT", AuctionFrame, "BOTTOMRIGHT", -32, 28)
+    f:Hide()
 
     local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    title:SetPoint("TOP", 0, -8); title:SetText("CheapBids Selling")
-    local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
-    close:SetPoint("TOPRIGHT", 0, 0)
+    title:SetPoint("TOPLEFT", 8, -6); title:SetText("Selling - suggested price")
 
-    -- shift-click target: an edit box that captures the dropped item link
     local grab = CreateFrame("EditBox", nil, f, "InputBoxTemplate")
-    grab:SetSize(280, 20); grab:SetPoint("TOP", 0, -30); grab:SetAutoFocus(false)
+    grab:SetSize(320, 20); grab:SetPoint("TOPLEFT", 12, -30); grab:SetAutoFocus(false)
+    grab:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
     grab:SetScript("OnTextChanged", function(self)
-        local link = self:GetText()
-        local id = link:match("|Hitem:(%d+):")
-        if id then SetItem(tonumber(id), link:match("|Hitem:.-|h%[.-%]|h") or link) end
+        local id = self:GetText():match("|Hitem:(%d+):")
+        if id then SetItem(tonumber(id), self:GetText():match("|Hitem:.-|h%[.-%]|h")) end
         self:SetText("")
     end)
-    grab:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+    local grabLbl = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    grabLbl:SetPoint("LEFT", grab, "RIGHT", 8, 0); grabLbl:SetText("shift-click item here")
 
     f.itemFS = f:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-    f.itemFS:SetPoint("TOPLEFT", 16, -58); f.itemFS:SetWidth(288); f.itemFS:SetJustifyH("LEFT")
+    f.itemFS:SetPoint("TOPLEFT", 16, -60); f.itemFS:SetWidth(400); f.itemFS:SetJustifyH("LEFT")
     f.marketFS = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    f.marketFS:SetPoint("TOPLEFT", 16, -82)
+    f.marketFS:SetPoint("TOPLEFT", 16, -84)
     f.suggestFS = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    f.suggestFS:SetPoint("TOPLEFT", 16, -102); f.suggestFS:SetWidth(288); f.suggestFS:SetJustifyH("LEFT")
+    f.suggestFS:SetPoint("TOPLEFT", 16, -104); f.suggestFS:SetWidth(440); f.suggestFS:SetJustifyH("LEFT")
 
     local fill = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-    fill:SetSize(180, 24); fill:SetPoint("BOTTOM", 0, 16); fill:SetText("Fill Auctions price")
+    fill:SetSize(180, 24); fill:SetPoint("TOPLEFT", 16, -132); fill:SetText("Fill Auctions price")
     fill:SetScript("OnClick", FillBlizzardPrice)
     f.fill = fill
 
-    f:SetScript("OnShow", Update)
-    win = f
-    Update()
-    return f
+    content = f
 end
+
+local function HideOthers()
+    if AuctionFrameBrowse then AuctionFrameBrowse:Hide() end
+    if AuctionFrameBid then AuctionFrameBid:Hide() end
+    if AuctionFrameAuctions then AuctionFrameAuctions:Hide() end
+    for _, c in ipairs({ AuctionFrame:GetChildren() }) do
+        if c ~= content and c.IsShown and c:IsShown() and c.IsObjectType and c:IsObjectType("Frame") then
+            local nm = c.GetName and c:GetName()
+            if not (nm and nm:find("AuctionFrameTab")) and (c:GetWidth() or 0) > 200 and (c:GetHeight() or 0) > 200 then c:Hide() end
+        end
+    end
+end
+local function ShowMine()
+    if not content then return end
+    HideOthers(); content:Show()
+    if myTabID then PanelTemplates_SetTab(AuctionFrame, myTabID) end
+    Update()
+    C_Timer.After(0, function() if content and content:IsShown() then HideOthers() end end)
+end
+local function HideMine() if content then content:Hide() end end
+
+local function CreateTab()
+    if myTabID or not AuctionFrame then return end
+    BuildContent()
+    local index = (AuctionFrame.numTabs or 3) + 1
+    local tab = CreateFrame("Button", "AuctionFrameTab" .. index, AuctionFrame, "AuctionTabTemplate")
+    tab:SetID(index); tab:SetText("CB Sell")
+    tab:SetPoint("LEFT", _G["AuctionFrameTab" .. (index - 1)], "RIGHT", -15, 0)
+    PanelTemplates_SetNumTabs(AuctionFrame, index)
+    PanelTemplates_EnableTab(AuctionFrame, index)
+    PanelTemplates_TabResize(tab, 0)
+    myTabID = index
+    hooksecurefunc("AuctionFrameTab_OnClick", function(self, _, _, idx)
+        idx = idx or (self and self.GetID and self:GetID())
+        if idx == myTabID then ShowMine() else HideMine() end
+    end)
+end
+
+local boot = CreateFrame("Frame")
+boot:RegisterEvent("AUCTION_HOUSE_SHOW")
+boot:SetScript("OnEvent", function() CreateTab() end)
 
 SLASH_CHEAPBIDSSELL1 = "/cbsell"
 SlashCmdList["CHEAPBIDSSELL"] = function()
-    if not win then BuildWindow() end
-    if win:IsShown() then win:Hide() else win:Show() end
+    if myTabID and _G["AuctionFrameTab" .. myTabID] then _G["AuctionFrameTab" .. myTabID]:Click()
+    else print("|cff33ff99CheapBids Selling|r: open the auction house first (adds a 'CB Sell' tab).") end
 end
 
 -- ---- test hook ------------------------------------------------------------
 if CheapBidsTest then
-    CheapBidsTest.SELL = {
-        MarketUnit = MarketUnit, Undercut = Undercut, SuggestUnit = SuggestUnit, Money = Money,
-    }
+    CheapBidsTest.SELL = { MarketUnit = MarketUnit, Undercut = Undercut, SuggestUnit = SuggestUnit, Money = Money }
 end
