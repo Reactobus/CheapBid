@@ -130,7 +130,7 @@ eq(#get("myBids"), 1, "DismissRow(bids): row removed")
 set("viewMode", "bids"); set("alwaysRedTarget", true); set("bidsDismissed", {})
 -- a red lot whose required re-bid is > 5g (bidAmt 6g + 1 inc = 6g 1c)
 setBidder({ { name = "BIG", itemID = 99, cnt = 1, buyout = 100, minBid = 10, minInc = 1,
-             bidAmt = 60000, high = false, timeLeft = 1, owner = "s99" } })
+             bidAmt = 1500000, high = false, timeLeft = 1, owner = "s99" } })
 fn.ReadMyBids()
 set("selectedItem", get("myBids")[1])
 MOCK.bids = {}; MOCK.popups = {}; MOCK.gt = MOCK.gt + 5
@@ -140,7 +140,7 @@ eq(#MOCK.popups, 1, ">5g re-bid: confirmation popup shown")
 local p = MOCK.popups[1]
 if p and p.data and p.data.commit then p.data.commit() end   -- player presses Accept
 eq(#MOCK.bids, 1, ">5g re-bid: placed after confirm")
-eq(MOCK.bids[1] and MOCK.bids[1].amount, 60001, ">5g re-bid: bids the full required amount")
+eq(MOCK.bids[1] and MOCK.bids[1].amount, 1500001, ">5g re-bid: bids the full required amount")
 
 -- ===== <=5g re-bid still places immediately (no popup) =====
 setBidder({ lot("C", 3, false, 1) })            -- eff = 20 + 1 = 21c, well under 5g
@@ -154,7 +154,7 @@ eq(#MOCK.bids, 1, "small re-bid: placed immediately")
 -- ===== auto-target NEVER lands on a >5g lot (my bids): FirstRed + alwaysRedTarget =====
 set("viewMode", "bids"); set("alwaysRedTarget", true); set("bidsDismissed", {}); set("selectedItem", nil)
 setBidder({
-    { name = "BIGRED",   itemID = 70, cnt = 1, buyout = 100, minBid = 10, minInc = 1, bidAmt = 60000, high = false, timeLeft = 1, owner = "s70" }, -- red <30m, >5g
+    { name = "BIGRED",   itemID = 70, cnt = 1, buyout = 100, minBid = 10, minInc = 1, bidAmt = 1500000, high = false, timeLeft = 1, owner = "s70" }, -- red <30m, >5g
     { name = "SMALLRED", itemID = 71, cnt = 1, buyout = 100, minBid = 10, minInc = 1, bidAmt = 20,    high = false, timeLeft = 2, owner = "s71" }, -- red 30m-2h, cheap
 })
 fn.ReadMyBids()
@@ -163,7 +163,7 @@ ok(get("selectedItem") and get("selectedItem").name == "SMALLRED", "alwaysRedTar
 
 -- ===== all reds >5g: nothing auto-targeted; manual pick still goes through confirm =====
 set("selectedItem", nil)
-setBidder({ { name = "BIG1", itemID = 72, cnt = 1, buyout = 100, minBid = 10, minInc = 1, bidAmt = 60000, high = false, timeLeft = 1, owner = "s72" } })
+setBidder({ { name = "BIG1", itemID = 72, cnt = 1, buyout = 100, minBid = 10, minInc = 1, bidAmt = 1500000, high = false, timeLeft = 1, owner = "s72" } })
 fn.ReadMyBids()
 ok(fn.FirstRed() == nil, "FirstRed: nil when every red is >5g (none auto-targetable)")
 ok(get("selectedItem") == nil, "alwaysRedTarget: no auto-select when all reds are >5g")
@@ -178,8 +178,8 @@ set("viewMode", "scan")
 set("filter", { bidMin = 1, bidMax = nil, buyMin = nil, buyMax = nil, quality = nil,
                 times = { [1] = true, [2] = true, [3] = true, [4] = true } })
 -- live snapshot lot whose effective bid is 7g; cheapItems entry points at idx 1
-MOCK.auctions.list = { { name = "GOLD7", itemID = 200, cnt = 1, buyout = 0, minBid = 70000, minInc = 1, bidAmt = 0, high = false } }
-local scanItem = { name = "GOLD7", itemID = 200, cnt = 1, buyout = 0, bid = 70000, idx = 1 }
+MOCK.auctions.list = { { name = "GOLD7", itemID = 200, cnt = 1, buyout = 0, minBid = 1500000, minInc = 1, bidAmt = 0, high = false } }
+local scanItem = { name = "GOLD7", itemID = 200, cnt = 1, buyout = 0, bid = 1500000, idx = 1 }
 set("cheapItems", { scanItem })
 set("selectedItem", scanItem)
 MOCK.bids = {}; MOCK.popups = {}; MOCK.gt = MOCK.gt + 5
@@ -190,7 +190,7 @@ local sp = MOCK.popups[1]
 if sp and sp.data and sp.data.commit then sp.data.commit() end   -- player presses Accept
 eq(#MOCK.bids, 1, "scan >5g: placed only after confirm")
 eq(MOCK.bids[1] and MOCK.bids[1].listType, "list", "scan >5g: bids the live snapshot list")
-eq(MOCK.bids[1] and MOCK.bids[1].amount, 70000, "scan >5g: amount = 7g")
+eq(MOCK.bids[1] and MOCK.bids[1].amount, 1500000, "scan >5g: amount = 7g")
 
 -- ===== SCAN view: a cheap bid still places immediately (no popup) =====
 MOCK.auctions.list = { { name = "CHEAP", itemID = 201, cnt = 1, buyout = 0, minBid = 50, minInc = 1, bidAmt = 0, high = false } }
@@ -224,8 +224,8 @@ set("priceProtect", false)
 set("viewMode", "scan")
 set("filter", { bidMin = 1, bidMax = nil, buyMin = nil, buyMax = nil, quality = nil,
                 times = { [1] = true, [2] = true, [3] = true, [4] = true } })
-MOCK.auctions.list = { { name = "GOLD7", itemID = 200, cnt = 1, buyout = 0, minBid = 70000, minInc = 1, bidAmt = 0, high = false } }
-local bigItem = { name = "GOLD7", itemID = 200, cnt = 1, buyout = 0, bid = 70000, idx = 1 }
+MOCK.auctions.list = { { name = "GOLD7", itemID = 200, cnt = 1, buyout = 0, minBid = 1500000, minInc = 1, bidAmt = 0, high = false } }
+local bigItem = { name = "GOLD7", itemID = 200, cnt = 1, buyout = 0, bid = 1500000, idx = 1 }
 set("cheapItems", { bigItem }); set("selectedItem", bigItem)
 MOCK.bids = {}; MOCK.popups = {}; MOCK.gt = MOCK.gt + 5
 fn.BidItem(bigItem)
@@ -233,10 +233,32 @@ eq(#MOCK.popups, 0, "protection OFF: >5g scan bid shows NO popup")
 eq(#MOCK.bids, 1, "protection OFF: >5g scan bid placed immediately")
 -- my-bids path: a >5g red is now auto-targetable
 set("viewMode", "bids"); set("alwaysRedTarget", true); set("bidsDismissed", {})
-setBidder({ { name = "BIGRED", itemID = 70, cnt = 1, buyout = 100, minBid = 10, minInc = 1, bidAmt = 60000, high = false, timeLeft = 1, owner = "s70" } })
+setBidder({ { name = "BIGRED", itemID = 70, cnt = 1, buyout = 100, minBid = 10, minInc = 1, bidAmt = 1500000, high = false, timeLeft = 1, owner = "s70" } })
 fn.ReadMyBids()
 ok(fn.FirstRed() and fn.FirstRed().name == "BIGRED", "protection OFF: a >5g red IS auto-targetable")
 set("priceProtect", true)   -- restore the default for any later tests
+
+-- ===== market-based price protection (ProtectThreshold / IsBig / NeedsConfirm) =====
+set("priceProtect", true); set("priceDB", {}); set("priceCount", {})
+-- unpriced item -> flat 100g fallback
+eq(fn.ProtectThreshold({ itemID = 700, cnt = 1 }), 100 * 10000, "protect: unpriced -> 100g fallback")
+ok(fn.NeedsConfirm({ itemID = 700, cnt = 1 }, 101 * 10000) == true,  "protect: 101g on unpriced -> confirm")
+ok(fn.NeedsConfirm({ itemID = 700, cnt = 1 }, 99 * 10000) == false,  "protect: 99g on unpriced -> no confirm")
+-- priced with >=2 lots: ceiling = 70% of unit * stack
+set("priceDB", { [800] = 10000 }); set("priceCount", { [800] = 3 })   -- 1g/unit, 3 lots -> reliable
+eq(fn.ProtectThreshold({ itemID = 800, cnt = 2 }), 0.70 * 10000 * 2, "protect: 70% of unit*stack (2 items)")
+ok(fn.NeedsConfirm({ itemID = 800, cnt = 1 }, 8000) == true,  "protect: 80c > 70c (70% of 1g) -> confirm")
+ok(fn.NeedsConfirm({ itemID = 800, cnt = 1 }, 6000) == false, "protect: 60c < 70c -> no confirm")
+ok(fn.IsBig({ itemID = 800, cnt = 1, bid = 8000 }) == true,   "protect: IsBig above market ceiling")
+ok(fn.IsBig({ itemID = 800, cnt = 1, bid = 6000 }) == false,  "protect: not big below market ceiling")
+-- priced but only ONE lot -> cannot estimate -> 100g fallback (not 70%)
+set("priceDB", { [900] = 10000 }); set("priceCount", { [900] = 1 })
+eq(fn.ProtectThreshold({ itemID = 900, cnt = 1 }), 100 * 10000, "protect: single lot -> 100g fallback, not 70%")
+-- protection OFF -> never confirms, never big, whatever the amount
+set("priceProtect", false)
+ok(fn.NeedsConfirm({ itemID = 700, cnt = 1 }, 500 * 10000) == false, "protect OFF: never confirms")
+ok(fn.IsBig({ itemID = 700, cnt = 1, bid = 500 * 10000 }) == false,  "protect OFF: never big")
+set("priceProtect", true); set("priceDB", {}); set("priceCount", {})
 
 -- ===== rarity sort: highest quality on top (descending) =====
 set("viewMode", "scan")
@@ -310,6 +332,24 @@ local tpS = priceTip(500, 4)
 fn.PriceTip(tpS)
 ok(tpS.lines[1]:find("stack of 4"), "priceTip: SHIFT prices the whole stack (unit x 4)")
 MOCK.shift = false
+
+-- ===== options panel: tunables validate + persist to CheapBidsDB, read back live =====
+CheapBidsDB = {}
+eq(fn.OptPct(), 70, "options: default protection cap 70%")
+eq(fn.OptFallback(), 100, "options: default fallback 100g")
+eq(fn.OptUndercut(), 1, "options: default undercut 1c")
+fn.SetPct(55); eq(CheapBidsDB.protectFraction, 0.55, "options: set cap 55% -> 0.55 fraction")
+eq(fn.OptPct(), 55, "options: reads cap back as 55")
+fn.SetPct(150); eq(CheapBidsDB.protectFraction, 1.0, "options: cap clamps to 100%")
+fn.SetPct(0);   eq(CheapBidsDB.protectFraction, 0.01, "options: cap clamps up to 1%")
+fn.SetPct("abc"); eq(CheapBidsDB.protectFraction, 0.01, "options: non-number cap ignored")
+fn.SetFallback(250); eq(CheapBidsDB.protectFallback, 250 * 10000, "options: fallback gold -> copper")
+fn.SetUndercut(5);   eq(CheapBidsDB.undercutCopper, 5, "options: undercut copper stored")
+-- and the protection math actually uses the tuned values
+set("priceProtect", true); set("priceDB", { [321] = 10000 }); set("priceCount", { [321] = 4 })
+CheapBidsDB.protectFraction = 0.50
+eq(fn.ProtectThreshold({ itemID = 321, cnt = 1 }), 0.50 * 10000, "options: ProtectThreshold uses tuned 50% cap")
+CheapBidsDB = {}; set("priceDB", {}); set("priceCount", {})
 
 -- ===== summary =====
 print(string.format("\nRESULT: %d passed, %d failed", passed, failed))

@@ -51,7 +51,7 @@ local viewMode = "scan"              -- "scan" = scan results | "bids" = live my
 local bidsPollToken = 0              -- cancels the my-bids auto-refresh ticker when the view / AH closes
 local alwaysRedTarget = true         -- my-bids: keep the highlight on OUTBID (red) lots only (checkbox, default ON)
 local autoScanBids = true            -- my-bids: auto-refresh outbid lots into the table 1/s (checkbox, default ON)
-local priceProtect = true            -- >5g protection (checkbox, default ON): confirm popup + never auto-target a >5g lot; OFF = fast rebid
+local priceProtect = true            -- market-based protection (checkbox, default ON): confirm popup + never auto-target a lot whose bid exceeds ~70% of its market value (or 100g when unpriced); OFF = fast rebid
 local bidsDismissed = {}             -- my-bids: lots right-clicked to hide (keyed by _key); reset on entry
 
 -- times: which of the 4 legacy time-left buckets to show (all on by default)
@@ -68,6 +68,11 @@ local filter = { bidMin = 1, bidMax = 99, buyMin = nil, buyMax = nil,
 -- page scan must not clobber the whole-market minimums).
 local priceDB = {}
 local scanPriceDB = nil
+-- how many lots (with a buyout) of each itemID the last GetAll saw. A market minimum is
+-- only trustworthy with >=2 lots; with a single lot we cannot really estimate the price,
+-- so price protection falls back to a flat cap. Persisted in CheapBidsDB.priceCount.
+local priceCount = {}
+local scanPriceCount = nil
 
 -- UI refs
 local content, leftCol, listFrame, statusFS, actFS, foundFS, cacheFS, progBar
@@ -93,14 +98,32 @@ local function FormatMoney(copper)
     return t
 end
 
--- Lots whose effective bid is above this need an explicit player confirm AND are NEVER
--- auto-targeted by the bid-spam advance - only a manual row click lands on one. Defined
--- early: UpdateButtons and the auto-target helpers below all reference it.
-local BID_CONFIRM_COPPER = 5 * 10000        -- 5g
--- Both gates obey the "Price protection" checkbox: OFF -> a >5g lot is auto-targetable
--- (IsBig false) AND its bid places with no confirm popup (NeedsConfirm false) = fast rebid.
-local function IsBig(it) return priceProtect and it and (it.bid or 0) > BID_CONFIRM_COPPER end
-local function NeedsConfirm(amount) return priceProtect and (amount or 0) > BID_CONFIRM_COPPER end
+-- Price protection is MARKET-BASED (not a flat 5g). A lot is "big" - it needs an explicit
+-- player confirm AND is never auto-targeted by the bid-spam advance - when the bid exceeds
+-- a ceiling derived from the item's real market value:
+--   ceiling = protectFraction (default 70%) * AucMin-per-unit * stack size,
+-- but ONLY when the last GetAll saw >=2 lots of that item (so the minimum is a real market
+-- floor, not just this single lot). With <2 lots / no scan we cannot judge the price, so we
+-- fall back to a flat cap (protectFallback, default 100g). Tunables live in CheapBidsDB and
+-- are editable from the in-game options panel; the defaults apply until changed.
+local DEF_PROTECT_FRACTION = 0.70
+local DEF_PROTECT_FALLBACK = 100 * 10000    -- 100g
+local function ProtectFraction() local v = CheapBidsDB and CheapBidsDB.protectFraction; return (type(v)=="number" and v>0) and v or DEF_PROTECT_FRACTION end
+local function ProtectFallback() local v = CheapBidsDB and CheapBidsDB.protectFallback; return (type(v)=="number" and v>0) and v or DEF_PROTECT_FALLBACK end
+local function ProtectThreshold(it)
+    if it and it.itemID and it.itemID ~= 0 then
+        local unit = priceDB[it.itemID]
+        local cnt  = priceCount[it.itemID]
+        if unit and unit > 0 and cnt and cnt >= 2 then
+            return ProtectFraction() * unit * (it.cnt or 1)
+        end
+    end
+    return ProtectFallback()
+end
+-- Both gates obey the "Price protection" checkbox: OFF -> any lot is auto-targetable
+-- (IsBig false) AND places with no confirm popup (NeedsConfirm false) = fast rebid.
+local function IsBig(it) return priceProtect and it and (it.bid or 0) > ProtectThreshold(it) end
+local function NeedsConfirm(it, amount) return priceProtect and it and (amount or 0) > ProtectThreshold(it) end
 
 local function BoxNum(e) local x = e:GetText(); if not x or x == "" then return 0 end return tonumber(x) or 0 end
 local function MoneyCopper(w) return BoxNum(w.g)*10000 + BoxNum(w.s)*100 + BoxNum(w.c) end
@@ -449,6 +472,7 @@ local function ReadIndexInto(cache, i, storeIdx)
         local unit = math.floor(buyout / n)
         local cur = scanPriceDB[itemID]
         if not cur or unit < cur then scanPriceDB[itemID] = unit end
+        if scanPriceCount then scanPriceCount[itemID] = (scanPriceCount[itemID] or 0) + 1 end
     end
     cache[#cache + 1] = {
         name = name or "", tex = tex, cnt = cnt or 1, qual = qual, owner = owner,
@@ -570,7 +594,11 @@ local function ProcessGetAll(start, total)
         -- the next GetAll overwrites them).
         if scanPriceDB then
             priceDB = scanPriceDB; scanPriceDB = nil
-            if CheapBidsDB then CheapBidsDB.priceDB = priceDB; CheapBidsDB.priceDBTime = time() end
+            priceCount = scanPriceCount or {}; scanPriceCount = nil
+            if CheapBidsDB then
+                CheapBidsDB.priceDB = priceDB; CheapBidsDB.priceCount = priceCount
+                CheapBidsDB.priceDBTime = time()
+            end
         end
         statusFS:SetText(string.format("Scan done: %d lots. Filter -> search -> bid.", #scanCache))
         if debugOn then TimeOrderDiag() end           -- auto time-order check while we have a fresh snapshot
@@ -601,7 +629,7 @@ local function StartScan()
     pageConfirm = false; cacheFromGetAll = false
     attempted = {}; pending = {}; bidsSent = 0; bidsOK = 0; bidsFail = 0; bidWatch = bidWatch + 1
     if CheapBidsDB then CheapBidsDB.lastGetAll = time() end
-    scanCache = {}; cheapItems = {}; scanPriceDB = {}; UpdateTable()
+    scanCache = {}; cheapItems = {}; scanPriceDB = {}; scanPriceCount = {}; UpdateTable()
     scanToken = scanToken + 1
     local myToken = scanToken
     if not ITEM_QUALITY_COLORS[-1] then ITEM_QUALITY_COLORS[-1] = { r=0, g=0, b=0 } end
@@ -783,7 +811,7 @@ local lastBidAt    = 0          -- real bids only - the server anti-spam gate
 -- (ReplaceEnchant) from a tainted execution path" (ERR-0003). The table always exists
 -- at addon-load in 2.5.5, so the `or {}` guard is unnecessary as well as harmful.
 StaticPopupDialogs["CHEAPBIDS_CONFIRM_BID"] = {
-    text = "CheapBids: place a bid of %s on\n%s ?\n\n(over 5g - confirm needed)",
+    text = "CheapBids: place a bid of %s on\n%s ?\n\n(price protection - confirm needed)",
     button1 = ACCEPT, button2 = CANCEL,
     OnAccept = function(self, data)
         data = data or (self and self.data)
@@ -1032,8 +1060,8 @@ local function RebidBidder(it)
         UpdateTable()
         return
     end
-    if NeedsConfirm(target.bid) then    -- >5g (protection ON): ask before placing
-        if actFS then actFS:SetText(string.format("Confirm re-bid of %s on %s (over 5g).", FormatMoney(target.bid), ItemName(target))) end
+    if NeedsConfirm(target, target.bid) then    -- above the market ceiling (protection ON): ask first
+        if actFS then actFS:SetText(string.format("Confirm re-bid of %s on %s (price protection).", FormatMoney(target.bid), ItemName(target))) end
         ConfirmBig(target, target.bid, function() CommitBidderBid(target) end)
         return
     end
@@ -1130,8 +1158,8 @@ local function BidItem(it)
         UpdateTable()
         return
     end
-    if NeedsConfirm(eff) then                    -- >5g (protection ON): never auto-place, ask first
-        if actFS then actFS:SetText(string.format("Confirm bid of %s on %s (over 5g).", FormatMoney(eff), ItemName(target))) end
+    if NeedsConfirm(target, eff) then            -- above the market ceiling (protection ON): ask first
+        if actFS then actFS:SetText(string.format("Confirm bid of %s on %s (price protection).", FormatMoney(eff), ItemName(target))) end
         ConfirmBig(target, eff, function() CommitScanBid(target) end)
         return
     end
@@ -1680,6 +1708,7 @@ ev:SetScript("OnEvent", function(_, event, arg1, arg2)
         CheapBidsDB = CheapBidsDB or {}
         CheapBidsDB.myBids = nil           -- drop the removed "old bids" saved record
         priceDB = CheapBidsDB.priceDB or {}   -- Auc min price survives reloads until the next GetAll
+        priceCount = CheapBidsDB.priceCount or {}
         print("|cff00cc00[CheapBids]|r loaded. IMPORTANT: disable Auctioneer/Auctionator to bid.")
     elseif event == "AUCTION_HOUSE_SHOW" then
         CreateTab()
@@ -1890,6 +1919,7 @@ local function AucStackCount(tip, link)
     return (n and n > 1) and n or 1
 end
 local function PriceTip(tip)
+    if CheapBidsDB and CheapBidsDB.aucTip == false then return end   -- toggled off in the options panel
     if not tip or tip.cbPriceShown then return end                  -- OnTooltipSetItem can re-fire
     local _, link = tip:GetItem()
     if not link then return end
@@ -1926,6 +1956,76 @@ end
 HookPriceTip(GameTooltip); HookPriceTip(ItemRefTooltip)
 HookPriceTip(ShoppingTooltip1); HookPriceTip(ShoppingTooltip2)
 
+-- ===== In-game options panel (Interface -> AddOns -> CheapBids) =====
+-- Manually-tunable knobs, persisted in CheapBidsDB and read live by the code above.
+-- Price-protection numbers take effect immediately; tooltip/browse toggles apply on the
+-- next hover (Compact Browse: after /reload). Built inside pcall so an options-API quirk
+-- on some client build can never stop the addon from loading.
+local OPT_PCT_DEF, OPT_FALLBACK_DEF_G, OPT_UNDERCUT_DEF_C = 70, 100, 1
+local function OptPct()      local v = CheapBidsDB and CheapBidsDB.protectFraction; return (type(v)=="number") and math.floor(v*100+0.5) or OPT_PCT_DEF end
+local function OptFallback() local v = CheapBidsDB and CheapBidsDB.protectFallback; return (type(v)=="number") and math.floor(v/10000) or OPT_FALLBACK_DEF_G end
+local function OptUndercut() local v = CheapBidsDB and CheapBidsDB.undercutCopper;  return (type(v)=="number") and v or OPT_UNDERCUT_DEF_C end
+local function SetPct(pct)      pct = tonumber(pct); if not pct then return end; if pct<1 then pct=1 elseif pct>100 then pct=100 end; CheapBidsDB = CheapBidsDB or {}; CheapBidsDB.protectFraction = pct/100 end
+local function SetFallback(g)   g = tonumber(g);  if not g or g<0 then return end; CheapBidsDB = CheapBidsDB or {}; CheapBidsDB.protectFallback = math.floor(g)*10000 end
+local function SetUndercut(c)   c = tonumber(c);  if not c or c<0 then return end; CheapBidsDB = CheapBidsDB or {}; CheapBidsDB.undercutCopper = math.floor(c) end
+
+local function BuildOptionsPanel()
+    local panel = CreateFrame("Frame", "CheapBidsOptionsPanel")
+    panel.name = "CheapBids"
+
+    local title = panel:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
+    title:SetPoint("TOPLEFT", 16, -16); title:SetText("CheapBids")
+    local sub = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+    sub:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -4)
+    sub:SetText("Auction sniping helper - options are saved per account.")
+
+    local yy = -66
+    local checks = {}
+    local function addCheck(label, key, needsReload)
+        local cb = CreateFrame("CheckButton", nil, panel, "UICheckButtonTemplate")
+        cb:SetPoint("TOPLEFT", 16, yy); cb:SetSize(24, 24)
+        local fs = cb:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+        fs:SetPoint("LEFT", cb, "RIGHT", 2, 0)
+        fs:SetText(label .. (needsReload and "  |cff808080(needs /reload)|r" or ""))
+        cb:SetScript("OnClick", function(self) CheapBidsDB = CheapBidsDB or {}; CheapBidsDB[key] = self:GetChecked() and true or false end)
+        cb._key = key; checks[#checks+1] = cb; yy = yy - 26
+    end
+    addCheck("Auc min price tooltip", "aucTip")
+    addCheck("Disenchant tooltip",    "disenchantTip")
+    addCheck("Prospect tooltip",      "prospectTip")
+    addCheck("Compact Browse tab",    "compactBrowse", true)
+
+    yy = yy - 8
+    local edits = {}
+    local function addEdit(label, getf, setf)
+        local fs = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        fs:SetPoint("TOPLEFT", 20, yy); fs:SetText(label)
+        local eb = CreateFrame("EditBox", nil, panel, "InputBoxTemplate")
+        eb:SetPoint("LEFT", fs, "RIGHT", 12, 0); eb:SetSize(70, 20)
+        eb:SetAutoFocus(false); eb:SetNumeric(true)
+        eb:SetScript("OnEnterPressed", function(self) setf(self:GetText()); self:SetText(tostring(getf())); self:ClearFocus() end)
+        eb:SetScript("OnEscapePressed", function(self) self:SetText(tostring(getf())); self:ClearFocus() end)
+        eb._get = getf; edits[#edits+1] = eb; yy = yy - 30
+    end
+    addEdit("Price protection cap, % of market value:", OptPct, SetPct)
+    addEdit("Protection fallback when unpriced, gold:", OptFallback, SetFallback)
+    addEdit("Selling undercut, copper:", OptUndercut, SetUndercut)
+
+    panel.refresh = function()
+        for _, cb in ipairs(checks) do cb:SetChecked((CheapBidsDB == nil) or (CheapBidsDB[cb._key] ~= false)) end
+        for _, eb in ipairs(edits) do eb:SetText(tostring(eb._get())) end
+    end
+    panel.okay = function() end
+    panel:SetScript("OnShow", panel.refresh)
+
+    if InterfaceOptions_AddCategory then
+        InterfaceOptions_AddCategory(panel)
+    elseif Settings and Settings.RegisterCanvasLayoutCategory and Settings.RegisterAddOnCategory then
+        Settings.RegisterAddOnCategory(Settings.RegisterCanvasLayoutCategory(panel, panel.name))
+    end
+end
+pcall(BuildOptionsPanel)
+
 -- ===== Test hook =====
 -- No in-game effect: WoW never sets the CheapBidsTest global. The standalone test
 -- harness (tests/) sets _G.CheapBidsTest = {} BEFORE loading this file, then uses
@@ -1939,12 +2039,17 @@ if CheapBidsTest then
         ActiveList = ActiveList, SortItems = SortItems, UpdateButtons = UpdateButtons, ReadFilter = ReadFilter,
         ItemLink = ItemLink,
         ReadIndexInto = ReadIndexInto, AucUnit = AucUnit, Significance = Significance, PriceTip = PriceTip,
+        IsBig = IsBig, NeedsConfirm = NeedsConfirm, ProtectThreshold = ProtectThreshold,
+        OptPct = OptPct, SetPct = SetPct, OptFallback = OptFallback, SetFallback = SetFallback,
+        OptUndercut = OptUndercut, SetUndercut = SetUndercut,
     }
     CheapBidsTest.set = function(k, v)
         if k == "myBids" then myBids = v
         elseif k == "scanCache" then scanCache = v
         elseif k == "priceDB" then priceDB = v
+        elseif k == "priceCount" then priceCount = v
         elseif k == "scanPriceDB" then scanPriceDB = v
+        elseif k == "scanPriceCount" then scanPriceCount = v
         elseif k == "cheapItems" then cheapItems = v
         elseif k == "viewMode" then viewMode = v
         elseif k == "selectedItem" then selectedItem = v
