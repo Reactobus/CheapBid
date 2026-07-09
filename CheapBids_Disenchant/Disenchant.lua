@@ -215,6 +215,21 @@ local function BuildLines(rows)
     return lines
 end
 
+-- ---- reverse: reagent itemID -> {lo, hi} gear item-level range it comes from --
+-- (Enchantrix ReverseDisenchantLevelList, classic branch). Lets us annotate a dust/
+-- essence/shard/crystal with "Disenchanted from: gear ilvl X-Y".
+local REVERSE_DE = {
+    [10940] = {1,25}, [11083] = {26,35}, [11137] = {36,45}, [11176] = {46,55},   -- dusts
+    [16204] = {56,65}, [22445] = {66,120},
+    [10938] = {1,15}, [10939] = {16,20}, [10998] = {21,25}, [11082] = {26,30},    -- essences
+    [11134] = {31,35}, [11135] = {36,40}, [11174] = {41,45}, [11175] = {46,50},
+    [16202] = {51,55}, [16203] = {56,65}, [22447] = {66,99}, [22446] = {100,120},
+    [10978] = {1,25}, [11084] = {26,30}, [11138] = {31,35}, [11139] = {36,40},     -- shards
+    [11177] = {41,45}, [11178] = {46,50}, [14343] = {51,55}, [14344] = {56,65},
+    [22448] = {66,99}, [22449] = {100,120},
+    [20725] = {56,94}, [22450] = {95,164},                                         -- crystals
+}
+
 -- ---- the hook -------------------------------------------------------------
 local function Enabled()
     if CheapBidsDB == nil then return true end  -- default ON
@@ -228,6 +243,13 @@ local function OnSetItem(tip)
     if not link then return end
     local itemID = tonumber(string.match(link, "item:(%d+)"))
     if not itemID or NON_DE[itemID] then return end
+    local rev = REVERSE_DE[itemID]              -- hovered a reagent: show where it comes from
+    if rev then
+        tip.cheapBidsDEShown = true
+        tip:AddLine(string.format("Disenchanted from: gear ilvl %d-%d", rev[1], rev[2]), 0.8, 0.6, 1.0, true)
+        tip:Show()
+        return
+    end
     local _, _, quality, ilvl, _, _, _, _, equipLoc = GetItemInfo(link)
     if not quality or quality < UNCOMMON or quality > EPIC then return end
     local rows = Lookup(quality, SLOT_CLASS[equipLoc], ilvl)
@@ -264,7 +286,7 @@ end
 if CheapBidsTest then
     CheapBidsTest.DE = {
         Lookup = Lookup, BuildLines = BuildLines, OnSetItem = OnSetItem,
-        RoundupLevel = RoundupLevel, R = R, NON_DE = NON_DE,
+        RoundupLevel = RoundupLevel, R = R, NON_DE = NON_DE, REVERSE_DE = REVERSE_DE,
         SLOT_CLASS = SLOT_CLASS, DE_TABLE = DE_TABLE,
         WEAPON = WEAPON, ARMOR = ARMOR,
     }

@@ -94,6 +94,16 @@ tip = fakeTip(5000); DE.OnSetItem(tip)
 eq(#tip.lines, 0, "tooltip: /cbde off -> nothing")
 CheapBidsDB.disenchantTip = true
 
+-- ===== reverse: hover a reagent -> "Disenchanted from: gear ilvl X-Y" =====
+CheapBidsDB.disenchantTip = true
+tip = fakeTip(10940); DE.OnSetItem(tip)                    -- Strange Dust -> ilvl 1-25
+eq(#tip.lines, 1, "reverse: reagent gets one source line")
+ok(tip.lines[1]:find("Disenchanted from"), "reverse: source label")
+ok(tip.lines[1]:find("1%-25"), "reverse: Strange Dust from ilvl 1-25")
+eq(DE.REVERSE_DE[22450][2], 164, "reverse: Void Crystal upper bound 164")
+tip = fakeTip(5000); DE.OnSetItem(tip)                    -- a gear item still shows the forward block
+ok(tip.lines[1] == "Disenchants into:", "reverse: gear still shows the forward DE block")
+
 -- ===== /cbde toggle =====
 SlashCmdList["CHEAPBIDSDE"]()
 eq(CheapBidsDB.disenchantTip, false, "/cbde: ON -> OFF")
