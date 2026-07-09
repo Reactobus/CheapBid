@@ -83,7 +83,7 @@ local NUM_ROWS = 0
 -- adaptive column sizing: refs filled by BuildTable, driven by MeasureColumns (forward-declared
 -- so UpdateTable can call it; the real body is defined after the width constants).
 local tableHdr, headerBtns, sepTex, measureFS = nil, {}, {}, nil
-local MeasureColumns
+local MeasureColumns, ResetColumnHiWater
 
 -- event frame
 local ev = CreateFrame("Frame")
@@ -410,6 +410,7 @@ end
 local function ApplyFilter()
     ReadFilter()
     viewMode = "scan"                -- any filter/search returns to the scan results view
+    if ResetColumnHiWater then ResetColumnHiWater() end   -- new result set -> re-fit columns once
     cheapItems = {}
     for _, it in ipairs(scanCache) do
         if not it.done and not it.led and TimeShown(it.timeLeft) and PassesFilter(it.bid, it.buyout) and QualityShown(it) then cheapItems[#cheapItems + 1] = it end
@@ -1282,39 +1283,61 @@ local function RelayoutColumns()
     end
 end
 
--- measure the visible/data content and size each column to fit it tightly, then relayout.
--- Money columns size to the WIDEST value in the whole list (stable, no jitter on scroll);
--- rarity/time to their widest label; seller to the widest visible name. Guarded: any error
--- disables adaptive sizing for the session and leaves the last (default) widths in place.
+-- Adaptive sizing, v2. Two rules learned from v1's bugs:
+--  * measure the RENDERED strings of the rows on screen, not the numerically-largest value
+--    (26g 58c is a bigger number than 25g 99s 70c but a SHORTER string - v1 sized to the big
+--    number and ellipsized the long one);
+--  * widths only GROW while a result set is on screen (high-water mark). Shrinking on every
+--    redraw made the whole table jump each time a lot was bought out / removed. The marks
+--    reset on the next ApplyFilter (new search -> snap to fit the new data once).
+-- Guarded: any error disables adaptive sizing for the session (fixed defaults remain).
 local adaptiveOff = false
+local colHiWater = nil                       -- nil = start fresh from the static minimums
+ResetColumnHiWater = function() colHiWater = nil end
 MeasureColumns = function()
     if adaptiveOff or not measureFS or not tableHdr then return end
     local ok, err = pcall(function()
         local function w(text) measureFS:SetText(text or ""); return measureFS:GetStringWidth() or 0 end
         local function clamp(v, lo, hi) if v < lo then return lo elseif v > hi then return hi else return v end end
-        local list = ActiveList()
-        local maxBid, maxBuy, maxAuc, maxCnt = 0, 0, 0, 1
-        for _, it in ipairs(list) do
-            if (it.bid or 0)    > maxBid then maxBid = it.bid end
-            if (it.buyout or 0) > maxBuy then maxBuy = it.buyout end
-            local au = AucUnit(it); if au and au > maxAuc then maxAuc = au end
-            if (it.cnt or 1)    > maxCnt then maxCnt = it.cnt end
-        end
         local pad = 10
-        local function moneyW(v) return (v > 0 and w(FormatMoney(v)) or w("-")) + pad end
-        C_BID = clamp(math.max(moneyW(maxBid), w("Bid") + pad),        30, 140)
-        C_AUC = clamp(math.max(moneyW(maxAuc), w("Auc min") + pad),    44, 140)
-        C_BUY = clamp(math.max(moneyW(maxBuy), w("Buyout") + pad),     44, 140)
-        C_CNT = clamp(math.max(w(tostring(maxCnt)), w("Qty")) + pad,   26, 60)
-        C_RAR = clamp(math.max(w("Uncommon"), w("Legendary")) + pad,   40, 96)
-        C_TIME = clamp(math.max(w("2-12h"), w(">12h"), w("Time left")) + pad, 44, 90)
-        local sw = w("Seller")
+        -- static floors: header captions + fixed label sets (these never jump)
+        if not colHiWater then
+            colHiWater = {
+                bid  = w("Bid") + pad,
+                auc  = math.max(w("Auc min") + pad, 44),
+                buy  = math.max(w("Buyout") + pad, 44),
+                cnt  = math.max(w("Qty") + pad, 26),
+                rar  = clamp(math.max(w("Uncommon"), w("Legendary")) + pad, 40, 96),
+                tim  = clamp(math.max(w("2-12h"), w(">12h"), w("Time left")) + pad, 44, 90),
+                sel  = math.max(w("Seller") + pad, 34),
+            }
+        end
+        -- grow to the widest string actually RENDERED in the visible rows
+        local hw = colHiWater
         for i = 1, NUM_ROWS do
             local r = tableRows[i]
-            if r and r:IsShown() and r.sellerFS then local sv = r.sellerFS:GetStringWidth() or 0; if sv > sw then sw = sv end end
+            if r and r:IsShown() then
+                local function grow(key, fs)
+                    if fs then local v = (fs:GetStringWidth() or 0) + pad; if v > hw[key] then hw[key] = v end end
+                end
+                grow("bid", r.bidFS); grow("auc", r.aucFS); grow("buy", r.buyFS)
+                grow("cnt", r.cntFS); grow("rar", r.rarFS); grow("tim", r.timeFS)
+                grow("sel", r.sellerFS)
+            end
         end
-        C_SELLER = clamp(sw + pad, 34, 120)
-        RelayoutColumns()
+        local nBid = clamp(hw.bid, 30, 140)
+        local nAuc = clamp(hw.auc, 44, 140)
+        local nBuy = clamp(hw.buy, 44, 140)
+        local nCnt = clamp(hw.cnt, 26, 60)
+        local nRar = clamp(hw.rar, 40, 96)
+        local nTim = clamp(hw.tim, 44, 90)
+        local nSel = clamp(hw.sel, 34, 120)
+        -- relayout only when something actually changed (no per-frame churn)
+        if nBid ~= C_BID or nAuc ~= C_AUC or nBuy ~= C_BUY or nCnt ~= C_CNT
+           or nRar ~= C_RAR or nTim ~= C_TIME or nSel ~= C_SELLER then
+            C_BID, C_AUC, C_BUY, C_CNT, C_RAR, C_TIME, C_SELLER = nBid, nAuc, nBuy, nCnt, nRar, nTim, nSel
+            RelayoutColumns()
+        end
     end)
     if not ok then adaptiveOff = true end   -- fall back to fixed layout for the rest of the session
 end
