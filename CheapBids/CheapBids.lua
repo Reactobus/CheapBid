@@ -2017,18 +2017,28 @@ SlashCmdList["CHEAPBIDS"] = function(arg)
 end
 
 -- ===== Auc min price tooltip (Auctionator-style) =====
--- On hover, append the lowest per-UNIT buyout we recorded for this item in the last GetAll.
--- Hold SHIFT to price the WHOLE hovered stack (unit x stack size) instead of a single item.
--- Additive HookScript only (no taint, class ERR-0003 not touched); reads priceDB, which
--- persists across reloads. To toggle SHIFT you re-hover (no live modifier refresh in v1).
+-- Rendered EXACTLY like Auctionator's Vendor/Auction rows: AddDoubleLine with the gold label
+-- on the left and the price on the right as white numbers with REAL coin icons
+-- (GetCoinTextureString) - same font, same format. Hold SHIFT to price the WHOLE hovered
+-- stack ("Auc min x20"); re-hover to toggle.
+-- PLACEMENT: installed as hooksecurefunc POST-hooks on the tooltip's Set* methods, NOT
+-- OnTooltipSetItem. OnTooltipSetItem handlers fire DURING the Set* call, Set*-post-hooks fire
+-- AFTER it - and Auctionator draws its Vendor/Auction rows from its own Set*-post-hooks
+-- (registered earlier: it loads before us alphabetically). Running after it puts our row
+-- directly UNDER Auctionator's, as requested. Additive hooks only - no taint (ERR-0003 class
+-- untouched). Reads priceDB, which persists across reloads.
 local function AucStackCount(tip, link)
     if tip.cbStack and tip.cbStack > 1 then return tip.cbStack end   -- real count from the bag slot
     local n = select(8, GetItemInfo(link))                          -- else the item's max stack size
     return (n and n > 1) and n or 1
 end
+local function AucCoinText(copper)
+    if GetCoinTextureString then return GetCoinTextureString(copper) end
+    return FormatMoney(copper)                                      -- headless tests: no coin textures
+end
 local function PriceTip(tip)
     if CheapBidsDB and CheapBidsDB.aucTip == false then return end   -- toggled off in the options panel
-    if not tip or tip.cbPriceShown then return end                  -- OnTooltipSetItem can re-fire
+    if not tip or tip.cbPriceShown or not tip.GetItem then return end -- several Set*-hooks can re-fire
     local _, link = tip:GetItem()
     if not link then return end
     local id = tonumber(string.match(link, "item:(%d+)"))
@@ -2036,12 +2046,12 @@ local function PriceTip(tip)
     local p = priceDB[id]
     if not p or p <= 0 then return end                              -- item never seen with a buyout
     tip.cbPriceShown = true
+    local label, amount = "Auc min", p
     if IsShiftKeyDown() then
         local n = AucStackCount(tip, link)
-        tip:AddLine("Auc min: " .. FormatMoney(p * n) .. " |cff808080(stack of " .. n .. ")|r", 0.5, 0.82, 1.0)
-    else
-        tip:AddLine("Auc min: " .. FormatMoney(p) .. " |cff808080(per item)|r", 0.5, 0.82, 1.0)
+        label, amount = "Auc min x" .. n, p * n
     end
+    tip:AddDoubleLine(label, AucCoinText(amount), 1, 0.82, 0, 1, 1, 1)   -- gold label, white price
     tip:Show()                                                      -- re-fit for the new line
 end
 -- capture the hovered stack size for the SHIFT = whole-stack price (bag slots only)
@@ -2055,11 +2065,26 @@ local function StashStack(tip, bag, slot)
     end
     tip.cbStack = n
 end
+-- every item-bearing Set* method we care about (skipped silently where a method
+-- does not exist on this client/tooltip)
+local PRICE_TIP_METHODS = {
+    "SetBagItem", "SetInventoryItem", "SetHyperlink", "SetAuctionItem", "SetAuctionSellItem",
+    "SetLootItem", "SetLootRollItem", "SetMerchantItem", "SetBuybackItem", "SetQuestItem",
+    "SetQuestLogItem", "SetTradeSkillItem", "SetCraftItem", "SetSendMailItem", "SetInboxItem",
+    "SetTradePlayerItem", "SetTradeTargetItem", "SetGuildBankItem", "SetCompareItem",
+}
 local function HookPriceTip(tip)
     if not tip or not tip.HookScript then return end
-    tip:HookScript("OnTooltipSetItem", PriceTip)
     tip:HookScript("OnTooltipCleared", function(t) t.cbPriceShown = nil; t.cbStack = nil end)
-    if tip.SetBagItem then hooksecurefunc(tip, "SetBagItem", StashStack) end
+    for _, m in ipairs(PRICE_TIP_METHODS) do
+        if type(tip[m]) == "function" then
+            if m == "SetBagItem" then
+                hooksecurefunc(tip, m, function(t, bag, slot) StashStack(t, bag, slot); PriceTip(t) end)
+            else
+                hooksecurefunc(tip, m, PriceTip)
+            end
+        end
+    end
 end
 HookPriceTip(GameTooltip); HookPriceTip(ItemRefTooltip)
 HookPriceTip(ShoppingTooltip1); HookPriceTip(ShoppingTooltip2)

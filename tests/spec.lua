@@ -308,11 +308,12 @@ local sig2 = fn.Significance({ itemID = 999, cnt = 1, bid = 10, buyout = 200 })
 ok(math.abs(sig2 - 20) < 1e-6, "Significance: unknown item falls back to lot buyout/bid")
 eq(fn.Significance({ itemID = 500, cnt = 1, bid = 0, buyout = 100 }), 0, "Significance: zero bid -> 0")
 
--- price tooltip: per-item by default, whole stack while SHIFT is held
+-- price tooltip: Auctionator-style double line (gold label left, price right);
+-- per-item by default, whole stack while SHIFT is held
 local function priceTip(id, stack)
     local t = { lines = {} }
     function t:GetItem() return "x", "|Hitem:" .. id .. ":0|h[x]|h" end
-    function t:AddLine(s) self.lines[#self.lines + 1] = s end
+    function t:AddDoubleLine(l, r) self.lines[#self.lines + 1] = { l = l, r = r } end
     function t:Show() end
     t.cbStack = stack
     return t
@@ -320,8 +321,9 @@ end
 MOCK.shift = false
 local tp = priceTip(500)
 fn.PriceTip(tp)
-eq(#tp.lines, 1, "priceTip: one line for a known item")
-ok(tp.lines[1]:find("per item"), "priceTip: per-item label without shift")
+eq(#tp.lines, 1, "priceTip: one double line for a known item")
+eq(tp.lines[1].l, "Auc min", "priceTip: plain label without shift")
+ok(tp.lines[1].r and tp.lines[1].r:find("5"), "priceTip: price on the right side (500c -> 5s)")
 fn.PriceTip(tp)
 eq(#tp.lines, 1, "priceTip: guard prevents a duplicate line")
 local tpU = priceTip(999)
@@ -330,8 +332,14 @@ eq(#tpU.lines, 0, "priceTip: unknown item shows nothing")
 MOCK.shift = true
 local tpS = priceTip(500, 4)
 fn.PriceTip(tpS)
-ok(tpS.lines[1]:find("stack of 4"), "priceTip: SHIFT prices the whole stack (unit x 4)")
+eq(tpS.lines[1].l, "Auc min x4", "priceTip: SHIFT label carries the stack size")
+ok(tpS.lines[1].r:find("20"), "priceTip: SHIFT prices the whole stack (500c x 4 = 20s)")
 MOCK.shift = false
+CheapBidsDB = CheapBidsDB or {}; CheapBidsDB.aucTip = false
+local tpOff = priceTip(500)
+fn.PriceTip(tpOff)
+eq(#tpOff.lines, 0, "priceTip: options toggle off -> nothing")
+CheapBidsDB.aucTip = nil
 
 -- ===== options panel: tunables validate + persist to CheapBidsDB, read back live =====
 CheapBidsDB = {}
