@@ -80,6 +80,10 @@ local scanBtn, searchBtn, bidBtn, stopBtn, myBidsBtn, perfectBtn
 local mBidMin, mBidMax, mBuyMin, mBuyMax
 local fauxScroll, tableRows, headerArrows = nil, {}, {}
 local NUM_ROWS = 0
+-- adaptive column sizing: refs filled by BuildTable, driven by MeasureColumns (forward-declared
+-- so UpdateTable can call it; the real body is defined after the width constants).
+local tableHdr, headerBtns, sepTex, measureFS = nil, {}, {}, nil
+local MeasureColumns
 
 -- event frame
 local ev = CreateFrame("Frame")
@@ -400,6 +404,7 @@ local function UpdateTable()
             row:Hide()
         end
     end
+    if MeasureColumns then MeasureColumns() end     -- adaptive: size columns to the current data
 end
 
 local function ApplyFilter()
@@ -1220,12 +1225,99 @@ local PANEL_BACKDROP = {
     tile = true, tileSize = 16, edgeSize = 16, insets = { left = 4, right = 4, top = 4, bottom = 4 },
 }
 
--- column right-offsets (from row right edge). Order L->R: name(flex), rarity, cnt, seller,
--- bid, buyout, auc, time. Bid/Buyout are deliberately narrow (cheap lots + market value
--- are short numbers) to fund the new Seller and Auc-min columns without widening the panel.
--- Bid / Buyout / Auc min share the same width so all three money columns line up and fit
--- full g/s/c prices on one line. Column order L->R: name, rarity, cnt, seller, bid, AUC, BUYOUT, time.
+-- Column widths. These are DEFAULTS/fallbacks; MeasureColumns re-sizes them to the actual
+-- data each redraw (adaptive). Order L->R: name(flex), rarity, cnt, seller, bid, AUC, BUYOUT, time.
 local C_BUY, C_BID, C_CNT, C_TIME, C_RAR, C_AUC, C_SELLER = 78, 78, 28, 50, 44, 78, 80
+
+-- right-offset (from the row/header RIGHT edge) of each column's right edge, for the CURRENT
+-- widths. name flexes to fill whatever is left. A 4px gutter sits between columns.
+local function ColOffs()
+    local o = {}
+    o.time   = 2
+    o.buyout = o.time   + C_TIME + 4
+    o.aucmin = o.buyout + C_BUY  + 4
+    o.bid    = o.aucmin + C_AUC  + 4
+    o.seller = o.bid    + C_BID  + 4
+    o.cnt    = o.seller + C_SELLER + 4
+    o.rarity = o.cnt    + C_CNT  + 4
+    o.nameR  = o.rarity + C_RAR  + 4
+    return o
+end
+-- key -> (width getter, row FontString field). name/time handled separately.
+local COLSPEC = {
+    rarity = { function() return C_RAR end,    "rarFS" },
+    cnt    = { function() return C_CNT end,    "cntFS" },
+    seller = { function() return C_SELLER end, "sellerFS" },
+    bid    = { function() return C_BID end,    "bidFS" },
+    aucmin = { function() return C_AUC end,    "aucFS" },
+    buyout = { function() return C_BUY end,    "buyFS" },
+    time   = { function() return C_TIME end,   "timeFS" },
+}
+local SEP_ORDER = { "rarity", "cnt", "seller", "bid", "aucmin", "buyout", "time" }
+
+-- re-anchor the header buttons, separators and every row's cells for the current widths.
+local function RelayoutColumns()
+    if not tableHdr or not headerBtns.name then return end
+    local o = ColOffs()
+    local nb = headerBtns.name
+    nb:ClearAllPoints(); nb:SetPoint("LEFT", tableHdr, "LEFT", 22, 0)
+    nb:SetPoint("RIGHT", tableHdr, "RIGHT", -o.nameR, 0); nb:SetHeight(18)
+    for key, spec in pairs(COLSPEC) do
+        local b = headerBtns[key]
+        if b then b:ClearAllPoints(); b:SetPoint("RIGHT", tableHdr, "RIGHT", -o[key], 0); b:SetSize(spec[1](), 18) end
+    end
+    for i, key in ipairs(SEP_ORDER) do
+        local s = sepTex[i]
+        if s then local off = o[key] + COLSPEC[key][1]()      -- the column's LEFT boundary
+            s:ClearAllPoints(); s:SetPoint("TOP", tableHdr, "TOPRIGHT", -off, -2); s:SetPoint("BOTTOM", tableHdr, "BOTTOMRIGHT", -off, 2) end
+    end
+    for _, r in ipairs(tableRows) do
+        if r.nameFS and r.icon then
+            r.nameFS:ClearAllPoints(); r.nameFS:SetPoint("LEFT", r.icon, "RIGHT", 3, 0); r.nameFS:SetPoint("RIGHT", r, "RIGHT", -o.nameR, 0)
+            for key, spec in pairs(COLSPEC) do
+                local fs = r[spec[2]]
+                if fs then fs:ClearAllPoints(); fs:SetPoint("RIGHT", r, "RIGHT", -o[key], 0); fs:SetWidth(spec[1]()) end
+            end
+        end
+    end
+end
+
+-- measure the visible/data content and size each column to fit it tightly, then relayout.
+-- Money columns size to the WIDEST value in the whole list (stable, no jitter on scroll);
+-- rarity/time to their widest label; seller to the widest visible name. Guarded: any error
+-- disables adaptive sizing for the session and leaves the last (default) widths in place.
+local adaptiveOff = false
+MeasureColumns = function()
+    if adaptiveOff or not measureFS or not tableHdr then return end
+    local ok, err = pcall(function()
+        local function w(text) measureFS:SetText(text or ""); return measureFS:GetStringWidth() or 0 end
+        local function clamp(v, lo, hi) if v < lo then return lo elseif v > hi then return hi else return v end end
+        local list = ActiveList()
+        local maxBid, maxBuy, maxAuc, maxCnt = 0, 0, 0, 1
+        for _, it in ipairs(list) do
+            if (it.bid or 0)    > maxBid then maxBid = it.bid end
+            if (it.buyout or 0) > maxBuy then maxBuy = it.buyout end
+            local au = AucUnit(it); if au and au > maxAuc then maxAuc = au end
+            if (it.cnt or 1)    > maxCnt then maxCnt = it.cnt end
+        end
+        local pad = 10
+        local function moneyW(v) return (v > 0 and w(FormatMoney(v)) or w("-")) + pad end
+        C_BID = clamp(math.max(moneyW(maxBid), w("Bid") + pad),        30, 140)
+        C_AUC = clamp(math.max(moneyW(maxAuc), w("Auc min") + pad),    44, 140)
+        C_BUY = clamp(math.max(moneyW(maxBuy), w("Buyout") + pad),     44, 140)
+        C_CNT = clamp(math.max(w(tostring(maxCnt)), w("Qty")) + pad,   26, 60)
+        C_RAR = clamp(math.max(w("Uncommon"), w("Legendary")) + pad,   40, 96)
+        C_TIME = clamp(math.max(w("2-12h"), w(">12h"), w("Time left")) + pad, 44, 90)
+        local sw = w("Seller")
+        for i = 1, NUM_ROWS do
+            local r = tableRows[i]
+            if r and r:IsShown() and r.sellerFS then local sv = r.sellerFS:GetStringWidth() or 0; if sv > sw then sw = sv end end
+        end
+        C_SELLER = clamp(sw + pad, 34, 120)
+        RelayoutColumns()
+    end)
+    if not ok then adaptiveOff = true end   -- fall back to fixed layout for the rest of the session
+end
 
 local function SetSortColumn(key)
     if viewMode == "bids" then return end               -- bids view is fixed: red (outbid) on top, green below
@@ -1264,6 +1356,9 @@ local function BuildTable()
     hbg:SetPoint("BOTTOMRIGHT", listFrame, "TOPRIGHT", -2, -20)
     hbg:SetColorTexture(0.12, 0.12, 0.28, 0.95)
 
+    tableHdr = hdr
+    measureFS = measureFS or hdr:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")   -- offscreen ruler
+    measureFS:Hide()
     local function headerBtn(key, text, anchorFn, just)
         local b = CreateFrame("Button", nil, hdr)
         anchorFn(b)
@@ -1271,6 +1366,7 @@ local function BuildTable()
         f:SetAllPoints(); f:SetJustifyH(just or "LEFT"); f:SetText(text)
         b:SetScript("OnClick", function() SetSortColumn(key) end)
         b:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight", "ADD")
+        headerBtns[key] = b
         return b
     end
     headerBtn("name", "Item", function(b) b:SetPoint("LEFT", hdr, "LEFT", 22, 0); b:SetPoint("RIGHT", hdr, "RIGHT", -(C_RAR+C_CNT+C_SELLER+C_BID+C_BUY+C_AUC+C_TIME+28), 0); b:SetHeight(18) end, "LEFT")
@@ -1283,11 +1379,12 @@ local function BuildTable()
     headerBtn("time", "Time left", function(b) b:SetPoint("RIGHT", hdr, "RIGHT", 0, 0); b:SetSize(C_TIME, 18) end, "LEFT")
     -- vertical separators between the column headers
     local seps = { C_RAR+C_CNT+C_SELLER+C_BID+C_BUY+C_AUC+C_TIME+24, C_CNT+C_SELLER+C_BID+C_BUY+C_AUC+C_TIME+20, C_SELLER+C_BID+C_BUY+C_AUC+C_TIME+16, C_BID+C_BUY+C_AUC+C_TIME+12, C_BUY+C_AUC+C_TIME+8, C_AUC+C_TIME+4, C_TIME+2 }
-    for _, off in ipairs(seps) do
+    for i, off in ipairs(seps) do
         local s = hdr:CreateTexture(nil, "ARTWORK")
         s:SetColorTexture(0.45, 0.45, 0.5, 0.7); s:SetWidth(1)
         s:SetPoint("TOP", hdr, "TOPRIGHT", -off, -2)
         s:SetPoint("BOTTOM", hdr, "BOTTOMRIGHT", -off, 2)
+        sepTex[i] = s
     end
 
     -- faux scroll
