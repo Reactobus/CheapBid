@@ -28,6 +28,10 @@ run(path.join(__dirname, '..', 'CheapBids_Disenchant', 'Disenchant.lua'));
 run(path.join(__dirname, 'spec_disenchant.lua'));
 run(path.join(__dirname, '..', 'CheapBids_Prospect', 'Prospect.lua'));
 run(path.join(__dirname, 'spec_prospect.lua'));
+run(path.join(__dirname, '..', 'CheapBids_Shopping', 'Shopping.lua'));
+run(path.join(__dirname, 'spec_shopping.lua'));
+run(path.join(__dirname, '..', 'CheapBids_Selling', 'Selling.lua'));
+run(path.join(__dirname, 'spec_selling.lua'));
 
 lua.lua_getglobal(L, to('TEST_FAILED'));
 const failed = lua.lua_tointeger(L, -1);
