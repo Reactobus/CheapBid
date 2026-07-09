@@ -2069,13 +2069,11 @@ HookPriceTip(ShoppingTooltip1); HookPriceTip(ShoppingTooltip2)
 -- Price-protection numbers take effect immediately; tooltip/browse toggles apply on the
 -- next hover (Compact Browse: after /reload). Built inside pcall so an options-API quirk
 -- on some client build can never stop the addon from loading.
-local OPT_PCT_DEF, OPT_FALLBACK_DEF_G, OPT_UNDERCUT_DEF_C = 70, 100, 1
+local OPT_PCT_DEF, OPT_FALLBACK_DEF_G = 70, 100
 local function OptPct()      local v = CheapBidsDB and CheapBidsDB.protectFraction; return (type(v)=="number") and math.floor(v*100+0.5) or OPT_PCT_DEF end
 local function OptFallback() local v = CheapBidsDB and CheapBidsDB.protectFallback; return (type(v)=="number") and math.floor(v/10000) or OPT_FALLBACK_DEF_G end
-local function OptUndercut() local v = CheapBidsDB and CheapBidsDB.undercutCopper;  return (type(v)=="number") and v or OPT_UNDERCUT_DEF_C end
 local function SetPct(pct)      pct = tonumber(pct); if not pct then return end; if pct<1 then pct=1 elseif pct>100 then pct=100 end; CheapBidsDB = CheapBidsDB or {}; CheapBidsDB.protectFraction = pct/100 end
 local function SetFallback(g)   g = tonumber(g);  if not g or g<0 then return end; CheapBidsDB = CheapBidsDB or {}; CheapBidsDB.protectFallback = math.floor(g)*10000 end
-local function SetUndercut(c)   c = tonumber(c);  if not c or c<0 then return end; CheapBidsDB = CheapBidsDB or {}; CheapBidsDB.undercutCopper = math.floor(c) end
 
 local function BuildOptionsPanel()
     local panel = CreateFrame("Frame", "CheapBidsOptionsPanel")
@@ -2117,7 +2115,6 @@ local function BuildOptionsPanel()
     end
     addEdit("Price protection cap, % of market value:", OptPct, SetPct)
     addEdit("Protection fallback when unpriced, gold:", OptFallback, SetFallback)
-    addEdit("Selling undercut, copper:", OptUndercut, SetUndercut)
 
     panel.refresh = function()
         for _, cb in ipairs(checks) do cb:SetChecked((CheapBidsDB == nil) or (CheapBidsDB[cb._key] ~= false)) end
@@ -2149,7 +2146,6 @@ if CheapBidsTest then
         ReadIndexInto = ReadIndexInto, AucUnit = AucUnit, Significance = Significance, PriceTip = PriceTip,
         IsBig = IsBig, NeedsConfirm = NeedsConfirm, ProtectThreshold = ProtectThreshold,
         OptPct = OptPct, SetPct = SetPct, OptFallback = OptFallback, SetFallback = SetFallback,
-        OptUndercut = OptUndercut, SetUndercut = SetUndercut,
     }
     CheapBidsTest.set = function(k, v)
         if k == "myBids" then myBids = v

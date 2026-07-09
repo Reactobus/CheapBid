@@ -37,21 +37,21 @@
 | Модуль-плагин CompactBrowse | `CheapBid\CheapBids_CompactBrowse\` (`CompactBrowse.lua`, `CheapBids_CompactBrowse.toc`) |
 | Модуль-плагин Disenchant | `CheapBid\CheapBids_Disenchant\` (`Disenchant.lua`, `CheapBids_Disenchant.toc`) |
 | Модуль-плагин Prospect | `CheapBid\CheapBids_Prospect\` (`Prospect.lua`, `CheapBids_Prospect.toc`) |
-| Модуль-плагин Shopping | `CheapBid\CheapBids_Shopping\` (`Shopping.lua`, `CheapBids_Shopping.toc`) |
-| Модуль-плагин Selling | `CheapBid\CheapBids_Selling\` (`Selling.lua`, `CheapBids_Selling.toc`) |
 | Remote | `https://github.com/Reactobus/CheapBid.git` |
 
 **Плагин-модули (каждый — отдельный аддон, `## Dependencies: CheapBids`, деплой своей папкой;
 новая папка → нужен полный рестарт игры, не `/reload`):**
 - **Disenchant** (`/cbde`) — тултип распыла + строка «Disenchanted from».
 - **Prospect** (`/cbpr`) — тултип «руда→самоцветы» + строка «Prospected from».
-- **Shopping** (`/cbshop`) — окно со списком предметов; клик → поиск в штатном Browse; цена из
-  `CheapBidsDB.priceDB`. Покупку делает Blizzard (своего денежного кода нет).
-- **Selling** (`/cbsell`) — окно: shift-click предмет → цена = рыночный минимум − undercut; кнопка
-  «Fill Auctions price» заполняет штатные поля цены. Постит Blizzard (своего постинга/депозита нет).
 
 Тумблеры и параметры — в **панели настроек игры** (Interface → AddOns → CheapBids): проценты
-защиты, fallback, undercut, вкл/выкл тултипов и Compact Browse. Всё пишется в `CheapBidsDB`.
+защиты, fallback, вкл/выкл тултипов и Compact Browse. Всё пишется в `CheapBidsDB`.
+
+> **Selling/Shopping-вкладки (история решения, 2026-07-09):** свои модули CB Shop/CB Sell были
+> написаны и **удалены** — вышли сырыми, а «просто скопировать» вкладки Auctionator нельзя:
+> его лицензия — **All Rights Reserved** (читать/изучать можно, копировать код — нет; это не
+> GPL, как у Enchantrix). Если возвращаться к идее — писать своё с нуля, подглядывая только
+> алгоритмы, либо ужиться с включённым Auctionator, проверив конфликт ставок.
 
 **Деплой в игру:** скопировать папку `CheapBids\` из репо в `...\Interface\AddOns\`
 (имя папки обязано совпадать с именем `.toc` — `CheapBids`), затем в игре `/reload`.

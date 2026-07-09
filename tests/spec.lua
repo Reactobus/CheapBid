@@ -337,14 +337,12 @@ MOCK.shift = false
 CheapBidsDB = {}
 eq(fn.OptPct(), 70, "options: default protection cap 70%")
 eq(fn.OptFallback(), 100, "options: default fallback 100g")
-eq(fn.OptUndercut(), 1, "options: default undercut 1c")
 fn.SetPct(55); eq(CheapBidsDB.protectFraction, 0.55, "options: set cap 55% -> 0.55 fraction")
 eq(fn.OptPct(), 55, "options: reads cap back as 55")
 fn.SetPct(150); eq(CheapBidsDB.protectFraction, 1.0, "options: cap clamps to 100%")
 fn.SetPct(0);   eq(CheapBidsDB.protectFraction, 0.01, "options: cap clamps up to 1%")
 fn.SetPct("abc"); eq(CheapBidsDB.protectFraction, 0.01, "options: non-number cap ignored")
 fn.SetFallback(250); eq(CheapBidsDB.protectFallback, 250 * 10000, "options: fallback gold -> copper")
-fn.SetUndercut(5);   eq(CheapBidsDB.undercutCopper, 5, "options: undercut copper stored")
 -- and the protection math actually uses the tuned values
 set("priceProtect", true); set("priceDB", { [321] = 10000 }); set("priceCount", { [321] = 4 })
 CheapBidsDB.protectFraction = 0.50
