@@ -2033,7 +2033,9 @@ local function AucStackCount(tip, link)
     return (n and n > 1) and n or 1
 end
 local function AucCoinText(copper)
-    if GetCoinTextureString then return GetCoinTextureString(copper) end
+    -- 12 = coin icon size; Auctionator draws its Vendor/Auction coins at 12x12, and the
+    -- GetCoinTextureString default (font height, 14) renders visibly bigger than theirs
+    if GetCoinTextureString then return GetCoinTextureString(copper, 12) end
     return FormatMoney(copper)                                      -- headless tests: no coin textures
 end
 local function PriceTip(tip)
