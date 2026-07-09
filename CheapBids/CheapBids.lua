@@ -459,8 +459,9 @@ end
 -- ===== Reading the auction list =====
 -- GetAuctionItemInfo: 1name 2tex 3cnt 4qual 5canUse 6lvl 7lvlCol 8minBid 9minInc 10buyout 11bidAmt 12high ... 17itemID
 local function ReadIndexInto(cache, i, storeIdx)
-    local name, tex, cnt, qual, _, _, _, minBid, minInc, buyout, bidAmt, high, _, owner, _, _, itemID =
+    local name, tex, cnt, qual, _, _, _, minBid, minInc, buyout, bidAmt, high, _, owner, ownerFull, _, itemID =
         GetAuctionItemInfo("list", i)
+    owner = owner or ownerFull        -- some realms fill only ownerFullName (15) in a GetAll dump
     if not name or name == "" then
         if not itemID or itemID == 0 then return end
     end
@@ -934,8 +935,9 @@ local function ReadMyBids()
     local fresh = {}
     local n = (GetNumAuctionItems and GetNumAuctionItems("bidder")) or 0
     for i = 1, n do
-        local name, tex, cnt, qual, _, _, _, minBid, minInc, buyout, bidAmt, high, _, owner, _, _, itemID =
+        local name, tex, cnt, qual, _, _, _, minBid, minInc, buyout, bidAmt, high, _, owner, ownerFull, _, itemID =
             GetAuctionItemInfo("bidder", i)
+        owner = owner or ownerFull
         if name and name ~= "" then
             local it = {
                 name = name, tex = tex, cnt = cnt or 1, qual = qual, owner = owner,   -- owner: DISPLAY only
@@ -1221,7 +1223,9 @@ local PANEL_BACKDROP = {
 -- column right-offsets (from row right edge). Order L->R: name(flex), rarity, cnt, seller,
 -- bid, buyout, auc, time. Bid/Buyout are deliberately narrow (cheap lots + market value
 -- are short numbers) to fund the new Seller and Auc-min columns without widening the panel.
-local C_BUY, C_BID, C_CNT, C_TIME, C_RAR, C_AUC, C_SELLER = 58, 40, 28, 50, 44, 78, 80
+-- Bid / Buyout / Auc min share the same width so all three money columns line up and fit
+-- full g/s/c prices on one line. Column order L->R: name, rarity, cnt, seller, bid, AUC, BUYOUT, time.
+local C_BUY, C_BID, C_CNT, C_TIME, C_RAR, C_AUC, C_SELLER = 78, 78, 28, 50, 44, 78, 80
 
 local function SetSortColumn(key)
     if viewMode == "bids" then return end               -- bids view is fixed: red (outbid) on top, green below
@@ -1273,9 +1277,9 @@ local function BuildTable()
     headerBtn("rarity", "Rarity", function(b) b:SetPoint("RIGHT", hdr, "RIGHT", -(C_CNT+C_SELLER+C_BID+C_BUY+C_AUC+C_TIME+24), 0); b:SetSize(C_RAR, 18) end, "LEFT")
     headerBtn("cnt", "Qty", function(b) b:SetPoint("RIGHT", hdr, "RIGHT", -(C_SELLER+C_BID+C_BUY+C_AUC+C_TIME+20), 0); b:SetSize(C_CNT, 18) end, "LEFT")
     headerBtn("seller", "Seller", function(b) b:SetPoint("RIGHT", hdr, "RIGHT", -(C_BID+C_BUY+C_AUC+C_TIME+16), 0); b:SetSize(C_SELLER, 18) end, "LEFT")
-    headerBtn("bid", "Bid", function(b) b:SetPoint("RIGHT", hdr, "RIGHT", -(C_BUY+C_AUC+C_TIME+12), 0); b:SetSize(C_BID, 18) end, "LEFT")
-    headerBtn("buyout", "Buyout", function(b) b:SetPoint("RIGHT", hdr, "RIGHT", -(C_AUC+C_TIME+8), 0); b:SetSize(C_BUY, 18) end, "LEFT")
-    headerBtn("aucmin", "Auc min", function(b) b:SetPoint("RIGHT", hdr, "RIGHT", -(C_TIME+4), 0); b:SetSize(C_AUC, 18) end, "LEFT")
+    headerBtn("bid", "Bid", function(b) b:SetPoint("RIGHT", hdr, "RIGHT", -(C_AUC+C_BUY+C_TIME+12), 0); b:SetSize(C_BID, 18) end, "LEFT")
+    headerBtn("aucmin", "Auc min", function(b) b:SetPoint("RIGHT", hdr, "RIGHT", -(C_BUY+C_TIME+8), 0); b:SetSize(C_AUC, 18) end, "LEFT")
+    headerBtn("buyout", "Buyout", function(b) b:SetPoint("RIGHT", hdr, "RIGHT", -(C_TIME+4), 0); b:SetSize(C_BUY, 18) end, "LEFT")
     headerBtn("time", "Time left", function(b) b:SetPoint("RIGHT", hdr, "RIGHT", 0, 0); b:SetSize(C_TIME, 18) end, "LEFT")
     -- vertical separators between the column headers
     local seps = { C_RAR+C_CNT+C_SELLER+C_BID+C_BUY+C_AUC+C_TIME+24, C_CNT+C_SELLER+C_BID+C_BUY+C_AUC+C_TIME+20, C_SELLER+C_BID+C_BUY+C_AUC+C_TIME+16, C_BID+C_BUY+C_AUC+C_TIME+12, C_BUY+C_AUC+C_TIME+8, C_AUC+C_TIME+4, C_TIME+2 }
@@ -1316,11 +1320,11 @@ local function BuildTable()
         local sellerFS = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
         sellerFS:SetPoint("RIGHT", r, "RIGHT", -(C_BID+C_BUY+C_AUC+C_TIME+16), 0); sellerFS:SetWidth(C_SELLER); sellerFS:SetJustifyH("LEFT"); sellerFS:SetWordWrap(false)
         local bidFS = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        bidFS:SetPoint("RIGHT", r, "RIGHT", -(C_BUY+C_AUC+C_TIME+12), 0); bidFS:SetWidth(C_BID); bidFS:SetJustifyH("RIGHT")
-        local buyFS = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        buyFS:SetPoint("RIGHT", r, "RIGHT", -(C_AUC+C_TIME+8), 0); buyFS:SetWidth(C_BUY); buyFS:SetJustifyH("RIGHT")
+        bidFS:SetPoint("RIGHT", r, "RIGHT", -(C_AUC+C_BUY+C_TIME+12), 0); bidFS:SetWidth(C_BID); bidFS:SetJustifyH("RIGHT"); bidFS:SetWordWrap(false)
         local aucFS = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        aucFS:SetPoint("RIGHT", r, "RIGHT", -(C_TIME+4), 0); aucFS:SetWidth(C_AUC); aucFS:SetJustifyH("RIGHT")
+        aucFS:SetPoint("RIGHT", r, "RIGHT", -(C_BUY+C_TIME+8), 0); aucFS:SetWidth(C_AUC); aucFS:SetJustifyH("RIGHT"); aucFS:SetWordWrap(false)
+        local buyFS = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        buyFS:SetPoint("RIGHT", r, "RIGHT", -(C_TIME+4), 0); buyFS:SetWidth(C_BUY); buyFS:SetJustifyH("RIGHT"); buyFS:SetWordWrap(false)
         local timeFS = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
         timeFS:SetPoint("RIGHT", r, "RIGHT", -2, 0); timeFS:SetWidth(C_TIME); timeFS:SetJustifyH("RIGHT")
         r.icon, r.nameFS, r.rarFS, r.cntFS, r.sellerFS, r.bidFS, r.buyFS, r.aucFS, r.timeFS, r.sel = icon, nameFS, rarFS, cntFS, sellerFS, bidFS, buyFS, aucFS, timeFS, sel
@@ -1555,12 +1559,19 @@ local function BuildUI()
         -- NOT `(v==-1) and nil or v`: that idiom returns v when the result is nil,
         -- so "All" would set quality=-1 (matches nothing) instead of nil (matches all)
         if self.value == -1 then filter.quality = nil else filter.quality = self.value end
-        RequestApplyFilter()                                    -- same path the time checkboxes use
-        -- ItemQuality reads GetItemInfo, which loads async for uncached lots; the
-        -- filter pass above kicks those loads off, so re-run once they settle so
-        -- freshly-resolved rarities are included.
+        -- Apply IMMEDIATELY (a rarity pick is a deliberate, non-spammable click, so bypass the
+        -- search/checkbox throttle - that throttle was why the list "didn't react" to the pick).
+        ApplyFilter()
+        -- Rarity comes from GetItemInfo, which loads ASYNC for uncached lots; the pass above only
+        -- kicks those loads off. One re-apply is not enough on a big cache (the lot's rarity stays
+        -- unresolved until it caches), which is why it "started working by itself" later. Re-apply
+        -- a few times over ~4s so the filter converges automatically as the item cache warms.
         if filter.quality ~= nil then
-            C_Timer.After(0.8, function() if uiBuilt and not isScanning and viewMode == "scan" then ApplyFilter() end end)
+            for _, delay in ipairs({ 0.4, 1.0, 2.0, 4.0 }) do
+                C_Timer.After(delay, function()
+                    if uiBuilt and not isScanning and viewMode == "scan" and filter.quality ~= nil then ApplyFilter() end
+                end)
+            end
         end
     end
     UIDropDownMenu_Initialize(rarityDD, function()
