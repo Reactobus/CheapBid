@@ -34,12 +34,16 @@
 | Игра, папка аддонов | `C:\Program Files (x86)\World of Warcraft\_anniversary_\Interface\AddOns\CheapBids\` |
 | Этот репозиторий | `C:\Users\Skullcrusher\Documents\GitHub\CheapBid\` |
 | Исходник аддона в репо | `CheapBid\CheapBids\` (`CheapBids.lua`, `CheapBids.toc`, `Bindings.xml`) |
+| Модуль-плагин CompactBrowse | `CheapBid\CheapBids_CompactBrowse\` (`CompactBrowse.lua`, `CheapBids_CompactBrowse.toc`) |
+| Модуль-плагин Disenchant | `CheapBid\CheapBids_Disenchant\` (`Disenchant.lua`, `CheapBids_Disenchant.toc`) |
 | Remote | `https://github.com/Reactobus/CheapBid.git` |
 
 **Деплой в игру:** скопировать папку `CheapBids\` из репо в `...\Interface\AddOns\`
 (имя папки обязано совпадать с именем `.toc` — `CheapBids`), затем в игре `/reload`.
 Папка репо называется `CheapBid` (без `s`), поэтому **клонировать прямо в AddOns
-нельзя** — копируется именно вложенная `CheapBids\`.
+нельзя** — копируется именно вложенная `CheapBids\`. Модули CompactBrowse и Disenchant —
+**отдельные аддоны**: копируются своими папками (`CheapBids_CompactBrowse\`,
+`CheapBids_Disenchant\`) рядом с `CheapBids\` (зависят через `## Dependencies: CheapBids`).
 
 **Цикл разработки:** правим `CheapBid\CheapBids\CheapBids.lua` → копируем в AddOns →
 `/reload` в игре → тест. (Lua-интерпретатора на машине нет — синтаксис проверяем
@@ -50,11 +54,29 @@
 ## Файлы
 
 - **`CheapBids.lua`** — весь аддон (self-contained, без внешних либ; своя таблица).
-- **`CheapBids.toc`** — `## Interface: 20505`, `SavedVariables: CheapBidsDB`.
+- **`CheapBids.toc`** — `## Interface: 20506` (bump per game patch — 2.5.6 = 20506), `SavedVariables: CheapBidsDB`.
 - **`Bindings.xml`** — хоткей `CHEAPBIDS_BIDTOP` → `CheapBids_KeyBid()` (= ставка по выбранному/верхнему валидному лоту).
 
 Слэш: `/cb`, `/cheapbids` — открыть/переключить вкладку. `/cb debug` — логировать
 каждый `PlaceAuctionBid` (для диагностики ставок).
+
+**Модуль-плагин `CheapBids_CompactBrowse`** (отдельный аддон, порт Auctioneer
+`Auc-Util-CompactUI`): делает **дефолтную** вкладку Browse аука компактной — 14 тонких
+строк (19px) вместо ~8, имена лотов окрашены по редкости (рисуются как item-link).
+Самодостаточен, кода CheapBids не трогает; ставки идут через штатную `BrowseBidButton`.
+Подменяет **глобальную функцию** `AuctionFrameBrowse_Update` (taint ограничен путём
+Browse — не путать с классом ERR-0003, где заражалась глобальная *таблица*). Слэш
+`/cbrowse` — вкл/выкл (пишется в `CheapBidsDB.compactBrowse`, применяется после `/reload`).
+
+**Модуль-плагин `CheapBids_Disenchant`** (отдельный аддон, порт disenchant-тултипа
+Enchantrix): при наведении на uncommon/rare/epic оружие или броню тултип показывает
+блок `Disenchants into:` — реагенты, шанс и среднее количество. Данные —
+`baseDisenchantTable` Enchantrix (classic-ветка `EnxConstants.lua`, скопирована 1:1),
+брекет = первый bound `>= ilvl`, weapon у rare/epic падает на armor-таблицу. Без
+LibStub/Babylonian/Stubby, чисто статическая таблица. Хуки только через `HookScript`
+на стандартные тултипы (аддитивно, taint не создаёт). Слэш `/cbde` — вкл/выкл
+(пишется в `CheapBidsDB.disenchantTip`, применяется сразу, без `/reload`). Тесты:
+`tests/spec_disenchant.lua` (запускаются общим `node tests/run.js`).
 
 ---
 
@@ -170,8 +192,11 @@
   (в режиме скана `scan auc` → `Stop`), прогресс-бар, счётчики `Cache:`/`Found:`,
   чекбоксы времени `<30m / 30m-2h / 2-12h / >12h`, статус ставок (под чекбоксами).
 - **Правая панель** (`rightPanel`/`listFrame`): таблица, колонки
-  `Item / Qty / Bid / Buyout / Time left`, сортировка по клику на заголовок,
-  `FauxScrollFrame`. Клик по строке — выбор; дабл-клик — ставка.
+  `Item / Rarity / Qty / Seller / Bid / Buyout / Auc min / Time left`, сортировка по
+  клику на заголовок, `FauxScrollFrame`. Клик по строке — выбор; дабл-клик — ставка.
+  Ширины колонок — константы `C_RAR/C_CNT/C_SELLER/C_BID/C_BUY/C_AUC/C_TIME` (Bid/Buyout
+  узкие; имя `name` — флекс). Правишь ширину/порядок — синхронно правь **три** места:
+  `headerBtn`-и, массив `seps` и создание `*FS` в строке (offset'ы считаются от правого края).
 
 ### Поток
 `scan auc` (GetAll) → авто-`ApplyFilter` → правка фильтра → `search` → выбрать строку
@@ -187,6 +212,21 @@
 - `ReconcileBids` / `ConfirmOldest` / `RejectOldest` — подтверждение/откат, удаление
   лота из таблицы после подтверждения.
 - Состояние ставок: `pending` (FIFO), `attempted`, `bidsOK/bidsFail`, `it._bidIdx`.
+
+### Auc min price (порт механизма Auctionator)
+- Во время GetAll `ReadIndexInto` (только при `storeIdx=true`) сворачивает **за-единицу**
+  buyout каждого лота в `scanPriceDB[itemID] = min` (O(1) на лот). При завершении
+  `ProcessGetAll` коммитит его в `priceDB` и в **SavedVariable** `CheapBidsDB.priceDB`
+  (+`priceDBTime`) — цена живёт между сессиями до следующего GetAll. Постраничный скан
+  прайс-БД **не** трогает (не полный рынок).
+- `AucUnit(it)` — рыночная мин-цена за единицу для `it.itemID` (или nil). Колонка
+  `Auc min` показывает её; тултип (`PriceTip`, аддитивный `HookScript`, taint не создаёт)
+  подписывает цену на **любом** предмете. **Shift** в тултипе = цена за весь стак
+  (`unit × кол-во`; кол-во стака ловится из слота сумки через `StashStack`).
+- **Perfect sort** (`Significance`) ранжирует по `value/bid`, где `value = AucUnit × cnt`
+  (рыночная стоимость всего лота), с откатом на собственный buyout лота, если предмета
+  нет в `priceDB`. Наверх — дешёвая ставка на дорогой по рынку предмет.
+- Тесты: блок «Auc min price DB + Perfect sort + price tooltip» в `tests/spec.lua`.
 
 ---
 

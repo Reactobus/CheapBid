@@ -202,6 +202,115 @@ fn.BidItem(smallItem)
 eq(#MOCK.popups, 0, "scan small: no confirmation popup")
 eq(#MOCK.bids, 1, "scan small: placed immediately")
 
+-- ===== Perfect sort: significance = buyout/bid, best steal (low bid, high buyout) on top =====
+set("viewMode", "scan")
+set("sortKey", "perfect"); set("sortAsc", false)
+set("cheapItems", {
+    { name = "mid",   bid = 10, buyout = 100 },   -- ratio 10
+    { name = "steal", bid = 1,  buyout = 100 },   -- ratio 100 -> top
+    { name = "poor",  bid = 50, buyout = 100 },   -- ratio 2
+    { name = "nobuy", bid = 1,  buyout = 0   },   -- ratio 0   -> bottom
+})
+fn.SortItems()
+local ps = fn.ActiveList()
+eq(ps[1].name, "steal", "perfect: lowest bid + high buyout on top")
+eq(ps[2].name, "mid",   "perfect: next best ratio")
+eq(ps[3].name, "poor",  "perfect: higher bid sinks")
+eq(ps[4].name, "nobuy", "perfect: no buyout sinks to bottom")
+
+-- ===== Price protection OFF: >5g bids place immediately, no popup; >5g red targetable =====
+set("priceProtect", false)
+-- scan path: 7g bid places with no confirmation
+set("viewMode", "scan")
+set("filter", { bidMin = 1, bidMax = nil, buyMin = nil, buyMax = nil, quality = nil,
+                times = { [1] = true, [2] = true, [3] = true, [4] = true } })
+MOCK.auctions.list = { { name = "GOLD7", itemID = 200, cnt = 1, buyout = 0, minBid = 70000, minInc = 1, bidAmt = 0, high = false } }
+local bigItem = { name = "GOLD7", itemID = 200, cnt = 1, buyout = 0, bid = 70000, idx = 1 }
+set("cheapItems", { bigItem }); set("selectedItem", bigItem)
+MOCK.bids = {}; MOCK.popups = {}; MOCK.gt = MOCK.gt + 5
+fn.BidItem(bigItem)
+eq(#MOCK.popups, 0, "protection OFF: >5g scan bid shows NO popup")
+eq(#MOCK.bids, 1, "protection OFF: >5g scan bid placed immediately")
+-- my-bids path: a >5g red is now auto-targetable
+set("viewMode", "bids"); set("alwaysRedTarget", true); set("bidsDismissed", {})
+setBidder({ { name = "BIGRED", itemID = 70, cnt = 1, buyout = 100, minBid = 10, minInc = 1, bidAmt = 60000, high = false, timeLeft = 1, owner = "s70" } })
+fn.ReadMyBids()
+ok(fn.FirstRed() and fn.FirstRed().name == "BIGRED", "protection OFF: a >5g red IS auto-targetable")
+set("priceProtect", true)   -- restore the default for any later tests
+
+-- ===== rarity sort: highest quality on top (descending) =====
+set("viewMode", "scan")
+set("sortKey", "rarity"); set("sortAsc", false)
+set("cheapItems", {
+    { name = "common", q = 1, bid = 1, buyout = 1 },
+    { name = "epic",   q = 4, bid = 1, buyout = 1 },
+    { name = "rare",   q = 3, bid = 1, buyout = 1 },
+})
+fn.SortItems()
+local rs = fn.ActiveList()
+eq(rs[1].name, "epic",   "rarity: epic on top (descending)")
+eq(rs[2].name, "rare",   "rarity: rare in the middle")
+eq(rs[3].name, "common", "rarity: common last")
+
+-- ===== ItemLink: a real chat-insertable hyperlink (shift-click), or nil =====
+local LNK = "|cffff0000|Hitem:555|h[Boom]|h|r"
+eq(fn.ItemLink({ link = LNK }), LNK, "ItemLink: uses an existing it.link")
+ok(fn.ItemLink({ itemID = 123 }) and fn.ItemLink({ itemID = 123 }):find("Hitem:123"),
+   "ItemLink: resolves a link from itemID")
+eq(fn.ItemLink({ name = "x" }), nil, "ItemLink: nil when only a name (no link/itemID)")
+
+-- ===== Auc min price DB + Perfect sort + price tooltip =====
+set("priceDB", {}); set("scanPriceDB", {})
+MOCK.auctions.list = {
+    { name = "A", itemID = 500, cnt = 1, buyout = 1000, minBid = 1, bidAmt = 0 },   -- unit 1000
+    { name = "B", itemID = 500, cnt = 5, buyout = 2500, minBid = 1, bidAmt = 0 },   -- unit 500  (min)
+    { name = "C", itemID = 500, cnt = 2, buyout = 3000, minBid = 1, bidAmt = 0 },   -- unit 1500
+    { name = "D", itemID = 600, cnt = 1, buyout = 0,    minBid = 1, bidAmt = 0 },   -- no buyout -> skip
+}
+local pcache = {}
+for i = 1, 4 do fn.ReadIndexInto(pcache, i, true) end
+local pdb = get("scanPriceDB")
+eq(pdb[500], 500, "priceDB: lowest per-unit buyout for item 500")
+eq(pdb[600], nil, "priceDB: buyout=0 lot not recorded")
+-- scan-only accumulation: a page read (no storeIdx) must NOT touch the market DB
+set("scanPriceDB", {})
+fn.ReadIndexInto({}, 1)
+eq(next(get("scanPriceDB")), nil, "priceDB: page scan (no storeIdx) records nothing")
+
+set("priceDB", pdb)
+eq(fn.AucUnit({ itemID = 500 }), 500, "AucUnit: per-unit market price from DB")
+eq(fn.AucUnit({ itemID = 999 }), nil, "AucUnit: unknown item -> nil")
+local sig = fn.Significance({ itemID = 500, cnt = 3, bid = 100, buyout = 99999 })
+ok(math.abs(sig - 15) < 1e-6, "Significance: market unit(500)*cnt(3)/bid(100) = 15, not lot buyout")
+local sig2 = fn.Significance({ itemID = 999, cnt = 1, bid = 10, buyout = 200 })
+ok(math.abs(sig2 - 20) < 1e-6, "Significance: unknown item falls back to lot buyout/bid")
+eq(fn.Significance({ itemID = 500, cnt = 1, bid = 0, buyout = 100 }), 0, "Significance: zero bid -> 0")
+
+-- price tooltip: per-item by default, whole stack while SHIFT is held
+local function priceTip(id, stack)
+    local t = { lines = {} }
+    function t:GetItem() return "x", "|Hitem:" .. id .. ":0|h[x]|h" end
+    function t:AddLine(s) self.lines[#self.lines + 1] = s end
+    function t:Show() end
+    t.cbStack = stack
+    return t
+end
+MOCK.shift = false
+local tp = priceTip(500)
+fn.PriceTip(tp)
+eq(#tp.lines, 1, "priceTip: one line for a known item")
+ok(tp.lines[1]:find("per item"), "priceTip: per-item label without shift")
+fn.PriceTip(tp)
+eq(#tp.lines, 1, "priceTip: guard prevents a duplicate line")
+local tpU = priceTip(999)
+fn.PriceTip(tpU)
+eq(#tpU.lines, 0, "priceTip: unknown item shows nothing")
+MOCK.shift = true
+local tpS = priceTip(500, 4)
+fn.PriceTip(tpS)
+ok(tpS.lines[1]:find("stack of 4"), "priceTip: SHIFT prices the whole stack (unit x 4)")
+MOCK.shift = false
+
 -- ===== summary =====
 print(string.format("\nRESULT: %d passed, %d failed", passed, failed))
 TEST_FAILED = failed

@@ -51,6 +51,7 @@ local viewMode = "scan"              -- "scan" = scan results | "bids" = live my
 local bidsPollToken = 0              -- cancels the my-bids auto-refresh ticker when the view / AH closes
 local alwaysRedTarget = true         -- my-bids: keep the highlight on OUTBID (red) lots only (checkbox, default ON)
 local autoScanBids = true            -- my-bids: auto-refresh outbid lots into the table 1/s (checkbox, default ON)
+local priceProtect = true            -- >5g protection (checkbox, default ON): confirm popup + never auto-target a >5g lot; OFF = fast rebid
 local bidsDismissed = {}             -- my-bids: lots right-clicked to hide (keyed by _key); reset on entry
 
 -- times: which of the 4 legacy time-left buckets to show (all on by default)
@@ -59,9 +60,18 @@ local filter = { bidMin = 1, bidMax = 99, buyMin = nil, buyMax = nil,
                  quality = nil,
                  times = { [1] = true, [2] = true, [3] = true, [4] = true } }
 
+-- "Auc min price" DB (Auctionator-style): itemID -> lowest per-UNIT buyout (copper)
+-- seen across the last full GetAll. Persisted in CheapBidsDB.priceDB, overwritten on
+-- each GetAll. `scanPriceDB` is the in-progress accumulator during a scan; it is
+-- committed to `priceDB` (and the SavedVariable) only when the scan completes, so the
+-- previous prices survive until fresh ones are ready. Only GetAll fills it (a partial
+-- page scan must not clobber the whole-market minimums).
+local priceDB = {}
+local scanPriceDB = nil
+
 -- UI refs
 local content, leftCol, listFrame, statusFS, actFS, foundFS, cacheFS, progBar
-local scanBtn, searchBtn, bidBtn, stopBtn, myBidsBtn
+local scanBtn, searchBtn, bidBtn, stopBtn, myBidsBtn, perfectBtn
 local mBidMin, mBidMax, mBuyMin, mBuyMax
 local fauxScroll, tableRows, headerArrows = nil, {}, {}
 local NUM_ROWS = 0
@@ -87,7 +97,10 @@ end
 -- auto-targeted by the bid-spam advance - only a manual row click lands on one. Defined
 -- early: UpdateButtons and the auto-target helpers below all reference it.
 local BID_CONFIRM_COPPER = 5 * 10000        -- 5g
-local function IsBig(it) return it and (it.bid or 0) > BID_CONFIRM_COPPER end
+-- Both gates obey the "Price protection" checkbox: OFF -> a >5g lot is auto-targetable
+-- (IsBig false) AND its bid places with no confirm popup (NeedsConfirm false) = fast rebid.
+local function IsBig(it) return priceProtect and it and (it.bid or 0) > BID_CONFIRM_COPPER end
+local function NeedsConfirm(amount) return priceProtect and (amount or 0) > BID_CONFIRM_COPPER end
 
 local function BoxNum(e) local x = e:GetText(); if not x or x == "" then return 0 end return tonumber(x) or 0 end
 local function MoneyCopper(w) return BoxNum(w.g)*10000 + BoxNum(w.s)*100 + BoxNum(w.c) end
@@ -164,6 +177,18 @@ local function ItemName(it)
     return "|cff888888(loading...)|r"
 end
 
+-- A real, chat-insertable hyperlink for the lot, or nil if none resolves yet. (ItemName
+-- may hand back a bare name / "loading" string, which a chat edit box can't turn into a
+-- clickable link - this returns only a proper |Hitem:..|h link.)
+local function ItemLink(it)
+    if it.link and it.link ~= "" then return it.link end
+    if it.itemID and it.itemID ~= 0 then
+        local _, l = GetItemInfo(it.itemID)
+        if l then it.link = l; return l end
+    end
+    return nil
+end
+
 -- ===== Throttled query =====
 
 local function SafeQuery(fn, depth)
@@ -199,13 +224,43 @@ end
 -- which list the table currently shows: scan results or the my-bids view
 local function ActiveList() return viewMode == "bids" and myBids or cheapItems end
 
+-- lowest per-UNIT market buyout for a lot's item (copper), from the last GetAll; nil if
+-- unknown. This is the Auctionator-style "what does this item really cost" reference,
+-- independent of THIS lot's own (maybe missing/inflated) buyout.
+local function AucUnit(it)
+    if not it or not it.itemID or it.itemID == 0 then return nil end
+    local p = priceDB[it.itemID]
+    if p and p > 0 then return p end
+    return nil
+end
+
+-- "Perfect sort" ranks by how much of a STEAL a lot is: a LOW bid against a HIGH market
+-- value is best (bid 1c on an item the market sells for 100g). The value reference is the
+-- market minimum per-unit buyout for that item across the whole GetAll (AucUnit) x this
+-- lot's stack size - NOT the lot's own buyout, which may be absent or padded. When the
+-- item never appeared with a buyout in the scan we fall back to the lot's own buyout, so
+-- behaviour matches the old scoring until a scan populates the price DB. score = value/bid,
+-- so a lower bid AND a higher market value both push it up; no value or no bid -> 0 (sinks).
+local function Significance(it)
+    local bid = it.bid or 0
+    if bid <= 0 then return 0 end
+    local unit = AucUnit(it)
+    local value = unit and unit * (it.cnt or 1) or (it.buyout or 0)
+    if value <= 0 then return 0 end
+    return value / bid
+end
+
 local function SortItems()
     table.sort(ActiveList(), function(a, b)
         local va, vb
         if sortKey == "name" then va, vb = (a.name or ""), (b.name or "")
+        elseif sortKey == "seller" then va, vb = (a.owner or ""), (b.owner or "")
         elseif sortKey == "cnt" then va, vb = a.cnt, b.cnt
+        elseif sortKey == "rarity" then va, vb = (ItemQuality(a) or -1), (ItemQuality(b) or -1)
         elseif sortKey == "buyout" then va, vb = a.buyout, b.buyout
+        elseif sortKey == "aucmin" then va, vb = (AucUnit(a) or -1), (AucUnit(b) or -1)
         elseif sortKey == "time" then va, vb = (a.timeLeft or 99), (b.timeLeft or 99)
+        elseif sortKey == "perfect" then va, vb = Significance(a), Significance(b)
         else va, vb = a.bid, b.bid end
         if va == vb then return (a.name or "") < (b.name or "") end
         if sortAsc then return va < vb else return va > vb end
@@ -213,6 +268,15 @@ local function SortItems()
 end
 
 local QCOLOR = { [0]="9d9d9d",[1]="ffffff",[2]="1eff00",[3]="0070dd",[4]="a335ee",[5]="ff8000" }
+
+-- rarity word for the Rarity column, coloured like the quality (empty while unresolved)
+local RARITY_NAME = { [0]="Poor", [1]="Common", [2]="Uncommon", [3]="Rare", [4]="Epic", [5]="Legendary" }
+local function RarityLabel(q)
+    local name = q and RARITY_NAME[q]
+    if not name then return "" end
+    local col = QCOLOR[q]
+    return col and ("|cff" .. col .. name .. "|r") or name
+end
 
 -- legacy AH time-left is a 4-bucket code, not exact seconds
 local TIME_LABEL = {
@@ -231,6 +295,7 @@ local function UpdateButtons()
     foundFS:SetText("Found: " .. (bidsView and #myBids or #cheapItems))
     if myBidsBtn then myBidsBtn:SetText(bidsView and "to scan" or "my bids") end
     if searchBtn then searchBtn:SetEnabled(not bidsView and #scanCache > 0 and idle) end
+    if perfectBtn then perfectBtn:SetEnabled(not bidsView and #cheapItems > 0 and idle) end
     local now = GetTime and GetTime() or 0
     local locked = floodMode and now > 0 and now < floodAnchor + FLOOD_LOCK   -- no bid earned yet
     if bidBtn then
@@ -287,7 +352,11 @@ local function UpdateTable()
             end
             row.icon:SetTexture(ic or 134400)
             row.cntFS:SetText(it.cnt and it.cnt > 1 and tostring(it.cnt) or "1")
+            row.rarFS:SetText(RarityLabel(ItemQuality(it)))
+            row.sellerFS:SetText((it.owner and it.owner ~= "" and it.owner) or "?")
             row.buyFS:SetText(it.buyout > 0 and FormatMoney(it.buyout) or "-")
+            local au = AucUnit(it)                               -- market min per-unit buyout (last GetAll)
+            row.aucFS:SetText(au and FormatMoney(au) or "-")
             if bidsView then
                 -- my-bids: status by name color (green = leading, red = OUTBID)
                 row.nameFS:SetText((it.name and it.name ~= "" and it.name) or ItemName(it))
@@ -367,13 +436,22 @@ end
 -- ===== Reading the auction list =====
 -- GetAuctionItemInfo: 1name 2tex 3cnt 4qual 5canUse 6lvl 7lvlCol 8minBid 9minInc 10buyout 11bidAmt 12high ... 17itemID
 local function ReadIndexInto(cache, i, storeIdx)
-    local name, tex, cnt, qual, _, _, _, minBid, minInc, buyout, bidAmt, high, _, _, _, _, itemID =
+    local name, tex, cnt, qual, _, _, _, minBid, minInc, buyout, bidAmt, high, _, owner, _, _, itemID =
         GetAuctionItemInfo("list", i)
     if not name or name == "" then
         if not itemID or itemID == 0 then return end
     end
+    -- Auc min price: on a GetAll (storeIdx) fold every lot's per-UNIT buyout into the
+    -- market-minimum table, keyed by itemID. O(1) per lot (a single hash write) - no
+    -- O(N^2) scan of scanCache. Lots with no buyout carry no market signal, skipped.
+    if storeIdx and scanPriceDB and itemID and itemID ~= 0 and buyout and buyout > 0 then
+        local n = cnt or 1; if n < 1 then n = 1 end
+        local unit = math.floor(buyout / n)
+        local cur = scanPriceDB[itemID]
+        if not cur or unit < cur then scanPriceDB[itemID] = unit end
+    end
     cache[#cache + 1] = {
-        name = name or "", tex = tex, cnt = cnt or 1, qual = qual,
+        name = name or "", tex = tex, cnt = cnt or 1, qual = qual, owner = owner,
         bid = CalcBid(minBid, minInc, bidAmt), buyout = buyout or 0,
         timeLeft = GetAuctionItemTimeLeft("list", i),   -- 1<30m 2:30m-2h 3:2-12h 4:>12h
         itemID = itemID, idx = storeIdx and i or nil,
@@ -487,6 +565,13 @@ local function ProcessGetAll(start, total)
     else
         isScanning = false; getAllPending = false; scanMode = nil
         cacheFromGetAll = true; HideProgress()
+        -- commit the freshly-built market minimums so tooltips/column/Perfect sort use
+        -- them, and persist them (Auctionator-style: they outlive the AH session until
+        -- the next GetAll overwrites them).
+        if scanPriceDB then
+            priceDB = scanPriceDB; scanPriceDB = nil
+            if CheapBidsDB then CheapBidsDB.priceDB = priceDB; CheapBidsDB.priceDBTime = time() end
+        end
         statusFS:SetText(string.format("Scan done: %d lots. Filter -> search -> bid.", #scanCache))
         if debugOn then TimeOrderDiag() end           -- auto time-order check while we have a fresh snapshot
         ApplyFilter()
@@ -516,7 +601,7 @@ local function StartScan()
     pageConfirm = false; cacheFromGetAll = false
     attempted = {}; pending = {}; bidsSent = 0; bidsOK = 0; bidsFail = 0; bidWatch = bidWatch + 1
     if CheapBidsDB then CheapBidsDB.lastGetAll = time() end
-    scanCache = {}; cheapItems = {}; UpdateTable()
+    scanCache = {}; cheapItems = {}; scanPriceDB = {}; UpdateTable()
     scanToken = scanToken + 1
     local myToken = scanToken
     if not ITEM_QUALITY_COLORS[-1] then ITEM_QUALITY_COLORS[-1] = { r=0, g=0, b=0 } end
@@ -690,7 +775,13 @@ local lastBidAt    = 0          -- real bids only - the server anti-spam gate
 
 -- The >5g confirm popup. Its Accept button is itself a HARDWARE EVENT, so PlaceAuctionBid
 -- still fires from a real click - exactly how the default UI confirms an expensive buyout.
-StaticPopupDialogs = StaticPopupDialogs or {}
+-- Write ONLY to a key here; NEVER reassign the StaticPopupDialogs global itself.
+-- `StaticPopupDialogs = StaticPopupDialogs or {}` writes the global VARIABLE from our
+-- insecure code, which taints it. Then every secure Blizzard popup that reads
+-- StaticPopupDialogs[which] (e.g. REPLACE_ENCHANT) runs on a tainted path and its
+-- protected OnAccept is blocked: "attempted to call a forbidden function
+-- (ReplaceEnchant) from a tainted execution path" (ERR-0003). The table always exists
+-- at addon-load in 2.5.5, so the `or {}` guard is unnecessary as well as harmful.
 StaticPopupDialogs["CHEAPBIDS_CONFIRM_BID"] = {
     text = "CheapBids: place a bid of %s on\n%s ?\n\n(over 5g - confirm needed)",
     button1 = ACCEPT, button2 = CANCEL,
@@ -815,18 +906,18 @@ local function ReadMyBids()
     local fresh = {}
     local n = (GetNumAuctionItems and GetNumAuctionItems("bidder")) or 0
     for i = 1, n do
-        local name, tex, cnt, qual, _, _, _, minBid, minInc, buyout, bidAmt, high, _, _, _, _, itemID =
+        local name, tex, cnt, qual, _, _, _, minBid, minInc, buyout, bidAmt, high, _, owner, _, _, itemID =
             GetAuctionItemInfo("bidder", i)
         if name and name ~= "" then
             local it = {
-                name = name, tex = tex, cnt = cnt or 1, qual = qual,
+                name = name, tex = tex, cnt = cnt or 1, qual = qual, owner = owner,   -- owner: DISPLAY only
                 bid = CalcBid(minBid, minInc, bidAmt),     -- amount needed to (re)take the lead
                 buyout = buyout or 0,
                 timeLeft = GetAuctionItemTimeLeft("bidder", i),
                 itemID = itemID, idx = i, led = high or false,
             }
-            -- stable identity for selection-preservation across refresh: NO owner (the
-            -- seller name resolves async and can flip nil<->name, which would lose the highlight)
+            -- stable identity for selection-preservation across refresh: NO owner in the KEY
+            -- (the seller name resolves async and can flip nil<->name, which would lose the highlight)
             it._key = tostring(itemID) .. ":" .. tostring(cnt or 1) .. ":" .. tostring(buyout or 0)
             if not bidsDismissed[it._key] then fresh[#fresh + 1] = it end   -- right-clicked lots stay hidden
 
@@ -941,7 +1032,7 @@ local function RebidBidder(it)
         UpdateTable()
         return
     end
-    if target.bid and target.bid > BID_CONFIRM_COPPER then    -- >5g: ask before placing
+    if NeedsConfirm(target.bid) then    -- >5g (protection ON): ask before placing
         if actFS then actFS:SetText(string.format("Confirm re-bid of %s on %s (over 5g).", FormatMoney(target.bid), ItemName(target))) end
         ConfirmBig(target, target.bid, function() CommitBidderBid(target) end)
         return
@@ -1039,7 +1130,7 @@ local function BidItem(it)
         UpdateTable()
         return
     end
-    if eff > BID_CONFIRM_COPPER then                    -- >5g: never auto-place, ask first
+    if NeedsConfirm(eff) then                    -- >5g (protection ON): never auto-place, ask first
         if actFS then actFS:SetText(string.format("Confirm bid of %s on %s (over 5g).", FormatMoney(eff), ItemName(target))) end
         ConfirmBig(target, eff, function() CommitScanBid(target) end)
         return
@@ -1099,17 +1190,30 @@ local PANEL_BACKDROP = {
     tile = true, tileSize = 16, edgeSize = 16, insets = { left = 4, right = 4, top = 4, bottom = 4 },
 }
 
--- column right-offsets (from row right edge): time, buyout, bid, cnt; name flexes
-local C_BUY, C_BID, C_CNT, C_TIME = 96, 96, 38, 58
+-- column right-offsets (from row right edge). Order L->R: name(flex), rarity, cnt, seller,
+-- bid, buyout, auc, time. Bid/Buyout are deliberately narrow (cheap lots + market value
+-- are short numbers) to fund the new Seller and Auc-min columns without widening the panel.
+local C_BUY, C_BID, C_CNT, C_TIME, C_RAR, C_AUC, C_SELLER = 58, 40, 28, 50, 44, 78, 80
 
 local function SetSortColumn(key)
     if viewMode == "bids" then return end               -- bids view is fixed: red (outbid) on top, green below
     if Throttled("sort", 0.2) then return end           -- header-spam guard (sorts up to ~4700)
-    if sortKey == key then sortAsc = not sortAsc else sortKey = key; sortAsc = (key == "bid" or key == "name" or key == "time") end
+    if sortKey == key then sortAsc = not sortAsc else sortKey = key; sortAsc = (key == "bid" or key == "name" or key == "time" or key == "seller") end
     for k, ar in pairs(headerArrows) do
         if k == key then ar:Show(); ar:SetTexCoord(0, 0.5625, sortAsc and 0 or 1, sortAsc and 1 or 0)
         else ar:Hide() end
     end
+    SortItems(); UpdateTable()
+end
+
+-- "Perfect sort" button: rank the found list by significance (low bid + high buyout on
+-- top). Not a column, so it clears the header arrows. First click = best on top
+-- (descending); a second click flips the direction.
+local function PerfectSort()
+    if viewMode ~= "scan" then return end               -- only the scan-results table
+    if Throttled("sort", 0.2) then return end
+    if sortKey == "perfect" then sortAsc = not sortAsc else sortKey = "perfect"; sortAsc = false end
+    for _, ar in pairs(headerArrows) do ar:Hide() end
     SortItems(); UpdateTable()
 end
 
@@ -1137,13 +1241,16 @@ local function BuildTable()
         b:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight", "ADD")
         return b
     end
-    headerBtn("name", "Item", function(b) b:SetPoint("LEFT", hdr, "LEFT", 22, 0); b:SetPoint("RIGHT", hdr, "RIGHT", -(C_CNT+C_BID+C_BUY+C_TIME+14), 0); b:SetHeight(18) end, "LEFT")
-    headerBtn("cnt", "Qty", function(b) b:SetPoint("RIGHT", hdr, "RIGHT", -(C_BID+C_BUY+C_TIME+10), 0); b:SetSize(C_CNT, 18) end, "LEFT")
-    headerBtn("bid", "Bid", function(b) b:SetPoint("RIGHT", hdr, "RIGHT", -(C_BUY+C_TIME+6), 0); b:SetSize(C_BID, 18) end, "LEFT")
-    headerBtn("buyout", "Buyout", function(b) b:SetPoint("RIGHT", hdr, "RIGHT", -(C_TIME+4), 0); b:SetSize(C_BUY, 18) end, "LEFT")
+    headerBtn("name", "Item", function(b) b:SetPoint("LEFT", hdr, "LEFT", 22, 0); b:SetPoint("RIGHT", hdr, "RIGHT", -(C_RAR+C_CNT+C_SELLER+C_BID+C_BUY+C_AUC+C_TIME+28), 0); b:SetHeight(18) end, "LEFT")
+    headerBtn("rarity", "Rarity", function(b) b:SetPoint("RIGHT", hdr, "RIGHT", -(C_CNT+C_SELLER+C_BID+C_BUY+C_AUC+C_TIME+24), 0); b:SetSize(C_RAR, 18) end, "LEFT")
+    headerBtn("cnt", "Qty", function(b) b:SetPoint("RIGHT", hdr, "RIGHT", -(C_SELLER+C_BID+C_BUY+C_AUC+C_TIME+20), 0); b:SetSize(C_CNT, 18) end, "LEFT")
+    headerBtn("seller", "Seller", function(b) b:SetPoint("RIGHT", hdr, "RIGHT", -(C_BID+C_BUY+C_AUC+C_TIME+16), 0); b:SetSize(C_SELLER, 18) end, "LEFT")
+    headerBtn("bid", "Bid", function(b) b:SetPoint("RIGHT", hdr, "RIGHT", -(C_BUY+C_AUC+C_TIME+12), 0); b:SetSize(C_BID, 18) end, "LEFT")
+    headerBtn("buyout", "Buyout", function(b) b:SetPoint("RIGHT", hdr, "RIGHT", -(C_AUC+C_TIME+8), 0); b:SetSize(C_BUY, 18) end, "LEFT")
+    headerBtn("aucmin", "Auc min", function(b) b:SetPoint("RIGHT", hdr, "RIGHT", -(C_TIME+4), 0); b:SetSize(C_AUC, 18) end, "LEFT")
     headerBtn("time", "Time left", function(b) b:SetPoint("RIGHT", hdr, "RIGHT", 0, 0); b:SetSize(C_TIME, 18) end, "LEFT")
     -- vertical separators between the column headers
-    local seps = { C_CNT+C_BID+C_BUY+C_TIME+14, C_BID+C_BUY+C_TIME+10, C_BUY+C_TIME+6, C_TIME+4 }
+    local seps = { C_RAR+C_CNT+C_SELLER+C_BID+C_BUY+C_AUC+C_TIME+24, C_CNT+C_SELLER+C_BID+C_BUY+C_AUC+C_TIME+20, C_SELLER+C_BID+C_BUY+C_AUC+C_TIME+16, C_BID+C_BUY+C_AUC+C_TIME+12, C_BUY+C_AUC+C_TIME+8, C_AUC+C_TIME+4, C_TIME+2 }
     for _, off in ipairs(seps) do
         local s = hdr:CreateTexture(nil, "ARTWORK")
         s:SetColorTexture(0.45, 0.45, 0.5, 0.7); s:SetWidth(1)
@@ -1172,20 +1279,33 @@ local function BuildTable()
         local icon = r:CreateTexture(nil, "ARTWORK"); icon:SetSize(16,16); icon:SetPoint("LEFT", r, "LEFT", 3, 0)
         local nameFS = r:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         nameFS:SetPoint("LEFT", icon, "RIGHT", 3, 0)
-        nameFS:SetPoint("RIGHT", r, "RIGHT", -(C_CNT+C_BID+C_BUY+C_TIME+14), 0)
+        nameFS:SetPoint("RIGHT", r, "RIGHT", -(C_RAR+C_CNT+C_SELLER+C_BID+C_BUY+C_AUC+C_TIME+28), 0)
         nameFS:SetJustifyH("LEFT"); nameFS:SetWordWrap(false)
+        local rarFS = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        rarFS:SetPoint("RIGHT", r, "RIGHT", -(C_CNT+C_SELLER+C_BID+C_BUY+C_AUC+C_TIME+24), 0); rarFS:SetWidth(C_RAR); rarFS:SetJustifyH("LEFT")
         local cntFS = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        cntFS:SetPoint("RIGHT", r, "RIGHT", -(C_BID+C_BUY+C_TIME+10), 0); cntFS:SetWidth(C_CNT); cntFS:SetJustifyH("CENTER")
+        cntFS:SetPoint("RIGHT", r, "RIGHT", -(C_SELLER+C_BID+C_BUY+C_AUC+C_TIME+20), 0); cntFS:SetWidth(C_CNT); cntFS:SetJustifyH("CENTER")
+        local sellerFS = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        sellerFS:SetPoint("RIGHT", r, "RIGHT", -(C_BID+C_BUY+C_AUC+C_TIME+16), 0); sellerFS:SetWidth(C_SELLER); sellerFS:SetJustifyH("LEFT"); sellerFS:SetWordWrap(false)
         local bidFS = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        bidFS:SetPoint("RIGHT", r, "RIGHT", -(C_BUY+C_TIME+6), 0); bidFS:SetWidth(C_BID); bidFS:SetJustifyH("RIGHT")
+        bidFS:SetPoint("RIGHT", r, "RIGHT", -(C_BUY+C_AUC+C_TIME+12), 0); bidFS:SetWidth(C_BID); bidFS:SetJustifyH("RIGHT")
         local buyFS = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        buyFS:SetPoint("RIGHT", r, "RIGHT", -(C_TIME+4), 0); buyFS:SetWidth(C_BUY); buyFS:SetJustifyH("RIGHT")
+        buyFS:SetPoint("RIGHT", r, "RIGHT", -(C_AUC+C_TIME+8), 0); buyFS:SetWidth(C_BUY); buyFS:SetJustifyH("RIGHT")
+        local aucFS = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        aucFS:SetPoint("RIGHT", r, "RIGHT", -(C_TIME+4), 0); aucFS:SetWidth(C_AUC); aucFS:SetJustifyH("RIGHT")
         local timeFS = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
         timeFS:SetPoint("RIGHT", r, "RIGHT", -2, 0); timeFS:SetWidth(C_TIME); timeFS:SetJustifyH("RIGHT")
-        r.icon, r.nameFS, r.cntFS, r.bidFS, r.buyFS, r.timeFS, r.sel = icon, nameFS, cntFS, bidFS, buyFS, timeFS, sel
+        r.icon, r.nameFS, r.rarFS, r.cntFS, r.sellerFS, r.bidFS, r.buyFS, r.aucFS, r.timeFS, r.sel = icon, nameFS, rarFS, cntFS, sellerFS, bidFS, buyFS, aucFS, timeFS, sel
         r:RegisterForClicks("LeftButtonUp", "RightButtonUp")
         r:SetScript("OnClick", function(self, button)
             if not self.item then return end
+            -- vanilla-AH behaviour: shift-click drops the item link into an open chat edit
+            -- box (ctrl = dress up, etc.). If a modified click consumed it, don't also
+            -- select/bid; otherwise fall through to normal row selection.
+            if button == "LeftButton" and IsModifiedClick() then
+                local link = ItemLink(self.item)
+                if link and HandleModifiedItemClick(link) then return end
+            end
             if button == "RightButton" then
                 if viewMode == "bids" then DismissRow(self.item) end   -- just remove, no bid
                 return
@@ -1270,6 +1390,13 @@ local function BuildUI()
     stopBtn = CreateFrame("Button", nil, leftCol, "UIPanelButtonTemplate")
     stopBtn:SetSize(BTN_W, BTN_H); stopBtn:SetPoint("LEFT", bidBtn, "RIGHT", 4, 0); stopBtn:SetText("cancel"); stopBtn:SetEnabled(false)
 
+    -- "Perfect sort": one-click rank of the found list by significance (lowest bid vs
+    -- highest buyout on top). Full width, directly under the bid/cancel row.
+    perfectBtn = CreateFrame("Button", nil, leftCol, "UIPanelButtonTemplate")
+    perfectBtn:SetSize(154, BTN_H); perfectBtn:SetPoint("TOPLEFT", bidBtn, "BOTTOMLEFT", 0, -6)
+    perfectBtn:SetText("Perfect sort"); perfectBtn:SetEnabled(false)
+    perfectBtn:SetScript("OnClick", PerfectSort)
+
     -- toggle: scan results  <->  my bids (live "bidder" list; re-bid outbid lots).
     -- pinned to the bottom of the left panel so it never collides with the grid.
     myBidsBtn = CreateFrame("Button", nil, leftCol, "UIPanelButtonTemplate")
@@ -1277,9 +1404,23 @@ local function BuildUI()
     myBidsBtn:SetText("my bids")
     myBidsBtn:SetScript("OnClick", ToggleBidsView)
 
-    -- my-bids options (both default ON)
+    -- my-bids / scan options (all default ON). Stack bottom->top above the my-bids button:
+    -- Price protection, then Always target red, then Autoscan bids.
+    -- Price protection (default ON): the >5g guard. OFF = rebid expensive lots fast with the
+    -- bid button (no confirm popup) and let the auto-target land on a >5g lot.
+    local protectCB = CreateFrame("CheckButton", nil, leftCol, "UICheckButtonTemplate")
+    protectCB:SetSize(20, 20); protectCB:SetPoint("BOTTOMLEFT", myBidsBtn, "TOPLEFT", 2, 6)
+    protectCB:SetChecked(priceProtect)
+    local protectLbl = protectCB:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    protectLbl:SetPoint("LEFT", protectCB, "RIGHT", 1, 0); protectLbl:SetText("Price protection")
+    protectCB:SetScript("OnClick", function(self)
+        priceProtect = self:GetChecked() and true or false
+        if viewMode == "bids" and alwaysRedTarget then selectedItem = FirstRed() end
+        UpdateTable()
+    end)
+
     local redCB = CreateFrame("CheckButton", nil, leftCol, "UICheckButtonTemplate")
-    redCB:SetSize(20, 20); redCB:SetPoint("BOTTOMLEFT", myBidsBtn, "TOPLEFT", 2, 6)
+    redCB:SetSize(20, 20); redCB:SetPoint("BOTTOMLEFT", protectCB, "TOPLEFT", 0, 2)
     redCB:SetChecked(alwaysRedTarget)
     local redLbl = redCB:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     redLbl:SetPoint("LEFT", redCB, "RIGHT", 1, 0); redLbl:SetText("Always target red")
@@ -1299,29 +1440,22 @@ local function BuildUI()
         if viewMode == "bids" and autoScanBids then RefreshMyBids(true) end
     end)
 
-    progBar = CreateFrame("StatusBar", nil, leftCol)
-    progBar:SetSize(154, 14); progBar:SetPoint("TOPLEFT", bidBtn, "BOTTOMLEFT", 0, -12)
-    progBar:SetStatusBarTexture("Interface\\TargetingFrame\\UI-StatusBar"); progBar:SetStatusBarColor(0.2,0.6,1.0)
-    progBar:SetMinMaxValues(0, 1); progBar:SetValue(0)
-    local pbBg = progBar:CreateTexture(nil, "BACKGROUND"); pbBg:SetAllPoints(); pbBg:SetColorTexture(0,0,0,0.5)
-    progBar.txt = progBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall"); progBar.txt:SetPoint("CENTER", progBar, "CENTER", 0, 0)
-    progBar:Hide()
-
-    -- counters live UNDER the status bar
+    -- counters sit directly under the Perfect sort button. (The scan progress bar was
+    -- moved out of the left panel into the top header - see next to the Rarity dropdown.)
     cacheFS = leftCol:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    cacheFS:SetPoint("TOPLEFT", progBar, "BOTTOMLEFT", 0, -8); cacheFS:SetText("Cache: 0")
+    cacheFS:SetPoint("TOPLEFT", perfectBtn, "BOTTOMLEFT", 0, -4); cacheFS:SetText("Cache: 0")   -- directly under Perfect sort
     foundFS = leftCol:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    foundFS:SetPoint("TOPLEFT", cacheFS, "BOTTOMLEFT", 0, -4); foundFS:SetText("Found: 0")
+    foundFS:SetPoint("TOPLEFT", cacheFS, "BOTTOMLEFT", 0, -3); foundFS:SetText("Found: 0")
 
     -- time-left filter: 4 buckets the legacy AH actually exposes (no 24/48h split)
     local timeHdr = leftCol:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    timeHdr:SetPoint("TOPLEFT", foundFS, "BOTTOMLEFT", 0, -10); timeHdr:SetText("Time left:")
+    timeHdr:SetPoint("TOPLEFT", foundFS, "BOTTOMLEFT", 0, -6); timeHdr:SetText("Time left:")
     local TIME_OPTS = { {1,"<30m"}, {2,"30m-2h"}, {3,"2-12h"}, {4,">12h"} }
     local timeChecks = {}
     for i, opt in ipairs(TIME_OPTS) do
         local cb = CreateFrame("CheckButton", nil, leftCol, "UICheckButtonTemplate")
         cb:SetSize(20, 20)
-        if i == 1 then cb:SetPoint("TOPLEFT", timeHdr, "BOTTOMLEFT", 0, -4)
+        if i == 1 then cb:SetPoint("TOPLEFT", timeHdr, "BOTTOMLEFT", 0, -3)
         elseif i == 2 then cb:SetPoint("LEFT", timeChecks[1], "LEFT", 78, 0)
         elseif i == 3 then cb:SetPoint("TOPLEFT", timeChecks[1], "BOTTOMLEFT", 0, -2)
         else cb:SetPoint("LEFT", timeChecks[3], "LEFT", 78, 0) end
@@ -1336,10 +1470,11 @@ local function BuildUI()
         timeChecks[i] = cb
     end
 
-    -- bid feedback lives under the checkboxes
+    -- bid feedback (incl. the multi-line >5g WARNING): pinned by its BOTTOM just above the
+    -- three checkboxes, so it grows UPWARD into the free space and can never overlap them.
     actFS = leftCol:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    actFS:SetPoint("TOPLEFT", timeChecks[3], "BOTTOMLEFT", 0, -12)
-    actFS:SetWidth(152); actFS:SetJustifyH("LEFT"); actFS:SetWordWrap(true)  -- <162: small right margin so text doesn't touch the border
+    actFS:SetPoint("BOTTOMLEFT", autoCB, "TOPLEFT", -2, 6)
+    actFS:SetWidth(152); actFS:SetJustifyH("LEFT"); actFS:SetJustifyV("BOTTOM"); actFS:SetWordWrap(true)  -- <162: small right margin so text doesn't touch the border
 
     -- right panel
     local rightPanel = CreateFrame("Frame", nil, content, bt)
@@ -1413,6 +1548,16 @@ local function BuildUI()
     UIDropDownMenu_SetWidth(rarityDD, 90)
     UIDropDownMenu_SetSelectedValue(rarityDD, -1)
     UIDropDownMenu_SetText(rarityDD, RarityText(-1))
+
+    -- scan / GetAll progress bar: lives in the top header, to the RIGHT of the Rarity
+    -- dropdown (moved here from the left panel, where it overlapped the Cache counter).
+    progBar = CreateFrame("StatusBar", nil, content)
+    progBar:SetSize(150, 14); progBar:SetPoint("LEFT", rarityDD, "RIGHT", -8, 2)
+    progBar:SetStatusBarTexture("Interface\\TargetingFrame\\UI-StatusBar"); progBar:SetStatusBarColor(0.2,0.6,1.0)
+    progBar:SetMinMaxValues(0, 1); progBar:SetValue(0)
+    local pbBg = progBar:CreateTexture(nil, "BACKGROUND"); pbBg:SetAllPoints(); pbBg:SetColorTexture(0,0,0,0.5)
+    progBar.txt = progBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall"); progBar.txt:SetPoint("CENTER", progBar, "CENTER", 0, 0)
+    progBar:Hide()
 
     scanBtn:SetScript("OnClick", function()
         if isScanning then AbortScan(); return end
@@ -1534,6 +1679,7 @@ ev:SetScript("OnEvent", function(_, event, arg1, arg2)
     if event == "ADDON_LOADED" and arg1 == ADDON_NAME then
         CheapBidsDB = CheapBidsDB or {}
         CheapBidsDB.myBids = nil           -- drop the removed "old bids" saved record
+        priceDB = CheapBidsDB.priceDB or {}   -- Auc min price survives reloads until the next GetAll
         print("|cff00cc00[CheapBids]|r loaded. IMPORTANT: disable Auctioneer/Auctionator to bid.")
     elseif event == "AUCTION_HOUSE_SHOW" then
         CreateTab()
@@ -1733,6 +1879,53 @@ SlashCmdList["CHEAPBIDS"] = function(arg)
     else print("|cffff4444[CheapBids]|r Open the auction house first.") end
 end
 
+-- ===== Auc min price tooltip (Auctionator-style) =====
+-- On hover, append the lowest per-UNIT buyout we recorded for this item in the last GetAll.
+-- Hold SHIFT to price the WHOLE hovered stack (unit x stack size) instead of a single item.
+-- Additive HookScript only (no taint, class ERR-0003 not touched); reads priceDB, which
+-- persists across reloads. To toggle SHIFT you re-hover (no live modifier refresh in v1).
+local function AucStackCount(tip, link)
+    if tip.cbStack and tip.cbStack > 1 then return tip.cbStack end   -- real count from the bag slot
+    local n = select(8, GetItemInfo(link))                          -- else the item's max stack size
+    return (n and n > 1) and n or 1
+end
+local function PriceTip(tip)
+    if not tip or tip.cbPriceShown then return end                  -- OnTooltipSetItem can re-fire
+    local _, link = tip:GetItem()
+    if not link then return end
+    local id = tonumber(string.match(link, "item:(%d+)"))
+    if not id then return end
+    local p = priceDB[id]
+    if not p or p <= 0 then return end                              -- item never seen with a buyout
+    tip.cbPriceShown = true
+    if IsShiftKeyDown() then
+        local n = AucStackCount(tip, link)
+        tip:AddLine("Auc min: " .. FormatMoney(p * n) .. " |cff808080(stack of " .. n .. ")|r", 0.5, 0.82, 1.0)
+    else
+        tip:AddLine("Auc min: " .. FormatMoney(p) .. " |cff808080(per item)|r", 0.5, 0.82, 1.0)
+    end
+    tip:Show()                                                      -- re-fit for the new line
+end
+-- capture the hovered stack size for the SHIFT = whole-stack price (bag slots only)
+local function StashStack(tip, bag, slot)
+    local n
+    if C_Container and C_Container.GetContainerItemInfo then
+        local info = C_Container.GetContainerItemInfo(bag, slot)
+        n = info and info.stackCount
+    elseif GetContainerItemInfo then
+        n = select(2, GetContainerItemInfo(bag, slot))
+    end
+    tip.cbStack = n
+end
+local function HookPriceTip(tip)
+    if not tip or not tip.HookScript then return end
+    tip:HookScript("OnTooltipSetItem", PriceTip)
+    tip:HookScript("OnTooltipCleared", function(t) t.cbPriceShown = nil; t.cbStack = nil end)
+    if tip.SetBagItem then hooksecurefunc(tip, "SetBagItem", StashStack) end
+end
+HookPriceTip(GameTooltip); HookPriceTip(ItemRefTooltip)
+HookPriceTip(ShoppingTooltip1); HookPriceTip(ShoppingTooltip2)
+
 -- ===== Test hook =====
 -- No in-game effect: WoW never sets the CheapBidsTest global. The standalone test
 -- harness (tests/) sets _G.CheapBidsTest = {} BEFORE loading this file, then uses
@@ -1744,15 +1937,20 @@ if CheapBidsTest then
         RebidBidder = RebidBidder, RejectBidderBid = RejectBidderBid, DismissRow = DismissRow,
         BidItem = BidItem, CommitScanBid = CommitScanBid,
         ActiveList = ActiveList, SortItems = SortItems, UpdateButtons = UpdateButtons, ReadFilter = ReadFilter,
+        ItemLink = ItemLink,
+        ReadIndexInto = ReadIndexInto, AucUnit = AucUnit, Significance = Significance, PriceTip = PriceTip,
     }
     CheapBidsTest.set = function(k, v)
         if k == "myBids" then myBids = v
         elseif k == "scanCache" then scanCache = v
+        elseif k == "priceDB" then priceDB = v
+        elseif k == "scanPriceDB" then scanPriceDB = v
         elseif k == "cheapItems" then cheapItems = v
         elseif k == "viewMode" then viewMode = v
         elseif k == "selectedItem" then selectedItem = v
         elseif k == "alwaysRedTarget" then alwaysRedTarget = v
         elseif k == "autoScanBids" then autoScanBids = v
+        elseif k == "priceProtect" then priceProtect = v
         elseif k == "bidsDismissed" then bidsDismissed = v
         elseif k == "filter" then filter = v
         elseif k == "sortKey" then sortKey = v
@@ -1768,6 +1966,8 @@ if CheapBidsTest then
         elseif k == "autoScanBids" then return autoScanBids
         elseif k == "bidsDismissed" then return bidsDismissed
         elseif k == "filter" then return filter
+        elseif k == "priceDB" then return priceDB
+        elseif k == "scanPriceDB" then return scanPriceDB
         else error("CheapBidsTest.get: unknown key " .. tostring(k)) end
     end
 end

@@ -1,4 +1,4 @@
-## Interface: 20505
+## Interface: 20506
 ## Title: CheapBids
 ## Notes: Auction tab listing lots with bid 1-99 copper. Manual bidding only.
 ## Author: Player

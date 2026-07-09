@@ -28,6 +28,7 @@ function hooksecurefunc() end
 C_Timer = { After = function() end }          -- timers never auto-fire under test
 ITEM_QUALITY_COLORS = setmetatable({}, { __index = function() return { r = 1, g = 1, b = 1 } end })
 
+function IsShiftKeyDown() return MOCK.shift or false end
 function CanSendAuctionQuery() return true, true end
 function QueryAuctionItems(name) MOCK.queries[#MOCK.queries + 1] = { name = name } end
 function SortAuctionItems() end
