@@ -24,6 +24,8 @@ function run(file) {
 run(path.join(__dirname, 'mocks.lua'));
 run(path.join(__dirname, '..', 'CheapBids', 'CheapBids.lua'));
 run(path.join(__dirname, 'spec.lua'));
+run(path.join(__dirname, '..', 'CheapBids_Disenchant', 'Disenchant.lua'));
+run(path.join(__dirname, 'spec_disenchant.lua'));
 
 lua.lua_getglobal(L, to('TEST_FAILED'));
 const failed = lua.lua_tointeger(L, -1);

@@ -1,0 +1,10 @@
+## Interface: 20506
+## Title: CheapBids |cff33ff99Disenchant|r
+## Notes: Item tooltips show what the item disenchants into and with what chance. A plug-in module of CheapBids.
+## Author: Player
+## Version: 2.0
+## Dependencies: CheapBids
+## X-Category: Auction House
+## X-Toggle: /cbde
+
+Disenchant.lua
