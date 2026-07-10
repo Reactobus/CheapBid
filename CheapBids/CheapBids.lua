@@ -2092,7 +2092,14 @@ local function PriceTip(tip)
     local label, amount = "Auc min", p
     if IsShiftKeyDown() then
         local n = AucStackCount(tip, link)
-        label, amount = "Auc min x" .. n, p * n
+        -- the " x20" multiplier is light blue, exactly like Auctionator's (LIGHTBLUE_FONT_COLOR)
+        local xs = " x" .. n
+        if LIGHTBLUE_FONT_COLOR and LIGHTBLUE_FONT_COLOR.WrapTextInColorCode then
+            xs = LIGHTBLUE_FONT_COLOR:WrapTextInColorCode(xs)
+        else
+            xs = "|cff8080ff" .. xs .. "|r"
+        end
+        label, amount = "Auc min" .. xs, p * n
     end
     tip:AddDoubleLine(label, AucCoinText(amount), 1, 0.82, 0, 1, 1, 1)   -- gold label, white price
     tip:Show()                                                      -- re-fit for the new line

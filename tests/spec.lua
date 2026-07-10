@@ -332,7 +332,9 @@ eq(#tpU.lines, 0, "priceTip: unknown item shows nothing")
 MOCK.shift = true
 local tpS = priceTip(500, 4)
 fn.PriceTip(tpS)
-eq(tpS.lines[1].l, "Auc min x4", "priceTip: SHIFT label carries the stack size")
+ok(tpS.lines[1].l:find("Auc min", 1, true) == 1 and tpS.lines[1].l:find("x4", 1, true),
+   "priceTip: SHIFT label carries the stack size")
+ok(tpS.lines[1].l:find("|cff8080ff x4|r", 1, true), "priceTip: multiplier wrapped in Auctionator's light blue")
 ok(tpS.lines[1].r:find("20"), "priceTip: SHIFT prices the whole stack (500c x 4 = 20s)")
 MOCK.shift = false
 CheapBidsDB = CheapBidsDB or {}; CheapBidsDB.aucTip = false
