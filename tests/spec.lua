@@ -354,6 +354,22 @@ ok(ct2:find("00 |T", 1, true) and ct2:find("02 |T", 1, true), "coin: silver/copp
 local ct3 = fn.AucCoinText(25)                   -- bare copper: no padding, no silver segment
 ok(ct3:find("25 |T", 1, true) == 1 and not ct3:find("SilverIcon", 1, true), "coin: bare copper stays unpadded, no silver")
 
+-- Auc min column sorts by the displayed LOT value (unit x stack), not the per-unit price
+set("viewMode", "scan")
+set("priceDB", { [500] = 500, [600] = 1000 }); set("priceCount", { [500] = 3, [600] = 3 })
+set("sortKey", "aucmin"); set("sortAsc", false)
+set("cheapItems", {
+    { name = "unit1000x1", itemID = 600, cnt = 1,  bid = 1, buyout = 0 },   -- lot value 1000
+    { name = "unit500x20", itemID = 500, cnt = 20, bid = 1, buyout = 0 },   -- lot value 10000 -> top
+    { name = "nodata",     itemID = 999, cnt = 20, bid = 1, buyout = 0 },   -- unpriced -> bottom
+})
+fn.SortItems()
+local ams = fn.ActiveList()
+eq(ams[1].name, "unit500x20", "aucmin sort: 20-stack of a cheaper unit outranks one pricier unit")
+eq(ams[2].name, "unit1000x1", "aucmin sort: single pricier unit second")
+eq(ams[3].name, "nodata",     "aucmin sort: unpriced item sinks to the bottom")
+set("priceDB", {}); set("priceCount", {})
+
 -- ===== options panel: tunables validate + persist to CheapBidsDB, read back live =====
 CheapBidsDB = {}
 eq(fn.OptPct(), 70, "options: default protection cap 70%")

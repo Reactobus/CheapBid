@@ -285,7 +285,10 @@ local function SortItems()
         elseif sortKey == "cnt" then va, vb = a.cnt, b.cnt
         elseif sortKey == "rarity" then va, vb = (ItemQuality(a) or -1), (ItemQuality(b) or -1)
         elseif sortKey == "buyout" then va, vb = a.buyout, b.buyout
-        elseif sortKey == "aucmin" then va, vb = (AucUnit(a) or -1), (AucUnit(b) or -1)
+        elseif sortKey == "aucmin" then                     -- sort by the displayed LOT value (unit x stack)
+            local ua, ub = AucUnit(a), AucUnit(b)
+            va = ua and ua * (a.cnt or 1) or -1
+            vb = ub and ub * (b.cnt or 1) or -1
         elseif sortKey == "time" then va, vb = (a.timeLeft or 99), (b.timeLeft or 99)
         elseif sortKey == "perfect" then va, vb = Significance(a), Significance(b)
         else va, vb = a.bid, b.bid end
@@ -382,8 +385,10 @@ local function UpdateTable()
             row.rarFS:SetText(RarityLabel(ItemQuality(it)))
             row.sellerFS:SetText((it.owner and it.owner ~= "" and it.owner) or "?")
             row.buyFS:SetText(it.buyout > 0 and FormatMoney(it.buyout) or "-")
-            local au = AucUnit(it)                               -- market min per-unit buyout (last GetAll)
-            row.aucFS:SetText(au and FormatMoney(au) or "-")
+            -- market value of the WHOLE lot: min per-unit buyout (last GetAll) x stack size,
+            -- so a 20-stack shows what the 20 are worth, comparable with Bid/Buyout
+            local au = AucUnit(it)
+            row.aucFS:SetText(au and FormatMoney(au * (it.cnt or 1)) or "-")
             if bidsView then
                 -- my-bids: status by name color (green = leading, red = OUTBID)
                 row.nameFS:SetText((it.name and it.name ~= "" and it.name) or ItemName(it))
