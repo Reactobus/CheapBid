@@ -341,6 +341,17 @@ fn.PriceTip(tpOff)
 eq(#tpOff.lines, 0, "priceTip: options toggle off -> nothing")
 CheapBidsDB.aucTip = nil
 
+-- coin text: Auctionator's format (12px icons, space before icon, zero-padded under gold)
+local ct = fn.AucCoinText(19125)                 -- 1g 91s 25c
+ok(ct:find("UI-GoldIcon:12:12:0:0", 1, true), "coin: gold icon 12px, no offset")
+ok(ct:find("1 |T", 1, true) == 1, "coin: space between number and icon")
+ok(ct:find("91 |T", 1, true), "coin: silver kept two-digit")
+ok(ct:find("25 |T", 1, true), "coin: copper kept two-digit")
+local ct2 = fn.AucCoinText(10002)                -- 1g 00s 02c: zero-padding under gold
+ok(ct2:find("00 |T", 1, true) and ct2:find("02 |T", 1, true), "coin: silver/copper zero-padded under gold")
+local ct3 = fn.AucCoinText(25)                   -- bare copper: no padding, no silver segment
+ok(ct3:find("25 |T", 1, true) == 1 and not ct3:find("SilverIcon", 1, true), "coin: bare copper stays unpadded, no silver")
+
 -- ===== options panel: tunables validate + persist to CheapBidsDB, read back live =====
 CheapBidsDB = {}
 eq(fn.OptPct(), 70, "options: default protection cap 70%")

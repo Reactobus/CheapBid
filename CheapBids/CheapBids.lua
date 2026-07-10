@@ -2055,11 +2055,29 @@ local function AucStackCount(tip, link)
     local n = select(8, GetItemInfo(link))                          -- else the item's max stack size
     return (n and n > 1) and n or 1
 end
+-- Money text in Auctionator's exact visual format, so our row blends with its Vendor/
+-- Auction rows: 12x12 coin icons with NO texture offset, a SPACE between the number and
+-- its icon, a space between denominations, and silver/copper zero-padded to two digits
+-- under a higher denomination ("1 [g] 91 [s] 25 [c]"). GetCoinTextureString glues the icon
+-- to the digits (offset 2, no space) and skips the padding - close, but visibly different
+-- next to Auctionator's rows, so we compose the string ourselves.
+local COIN_ICON = {
+    g = "|TInterface\\MoneyFrame\\UI-GoldIcon:12:12:0:0|t",
+    s = "|TInterface\\MoneyFrame\\UI-SilverIcon:12:12:0:0|t",
+    c = "|TInterface\\MoneyFrame\\UI-CopperIcon:12:12:0:0|t",
+}
 local function AucCoinText(copper)
-    -- 12 = coin icon size; Auctionator draws its Vendor/Auction coins at 12x12, and the
-    -- GetCoinTextureString default (font height, 14) renders visibly bigger than theirs
-    if GetCoinTextureString then return GetCoinTextureString(copper, 12) end
-    return FormatMoney(copper)                                      -- headless tests: no coin textures
+    local g = math.floor(copper / 10000)
+    local s = math.floor(copper % 10000 / 100)
+    local c = copper % 100
+    local out = ((g > 0 or s > 0) and string.format("%02d", c) or tostring(c)) .. " " .. COIN_ICON.c
+    if g > 0 or s > 0 then
+        out = (g > 0 and string.format("%02d", s) or tostring(s)) .. " " .. COIN_ICON.s .. " " .. out
+    end
+    if g > 0 then
+        out = g .. " " .. COIN_ICON.g .. " " .. out
+    end
+    return out
 end
 local function PriceTip(tip)
     if CheapBidsDB and CheapBidsDB.aucTip == false then return end   -- toggled off in the options panel
@@ -2194,6 +2212,7 @@ if CheapBidsTest then
         ActiveList = ActiveList, SortItems = SortItems, UpdateButtons = UpdateButtons, ReadFilter = ReadFilter,
         ItemLink = ItemLink,
         ReadIndexInto = ReadIndexInto, AucUnit = AucUnit, Significance = Significance, PriceTip = PriceTip,
+        AucCoinText = AucCoinText,
         IsBig = IsBig, NeedsConfirm = NeedsConfirm, ProtectThreshold = ProtectThreshold,
         OptPct = OptPct, SetPct = SetPct, OptFallback = OptFallback, SetFallback = SetFallback,
     }
