@@ -402,6 +402,23 @@ eq(dl[1].name, "win",  "disloot profit-column sort: 30s profit on top")
 eq(dl[2].name, "win3", "disloot profit-column sort: 10s profit second")
 eq(dl[3].name, "win2", "disloot profit-column sort: 1s profit last")
 
+-- regression: the confirm-time walk-down advance must use BUY logic in this view.
+-- A reagent-covered lot with a big BID used to be skipped by the bid-based IsBig,
+-- while NextBuyable still targeted it -> the highlight hopped down and back up.
+set("priceProtect", true)
+set("priceDB", { [800] = 100 }); set("priceCount", { [800] = 5 })   -- market ceiling 70c: a 50s bid is "big"
+local hopA = { name = "hopA", itemID = 800, cnt = 1, bid = 10,   buyout = 2000, timeLeft = 4 }
+local hopB = { name = "hopB", itemID = 800, cnt = 1, bid = 5000, buyout = 2000, timeLeft = 4 }
+local hopC = { name = "hopC", itemID = 800, cnt = 1, bid = 10,   buyout = 4900, timeLeft = 4 }
+set("scanCache", { hopA, hopB, hopC })
+fn.ApplyDisLoot(true)
+eq(fn.ActiveList()[1].name, "hopA", "hop: profit order puts hopA first")
+set("selectedItem", fn.ActiveList()[1])
+fn.DismissRow(fn.ActiveList()[1])                   -- RemoveItem path = same advance as a confirmed buy
+ok(get("selectedItem") and get("selectedItem").name == "hopB",
+   "hop: advance lands on the big-bid but reagent-covered lot (no skip, no hopping)")
+set("priceDB", {}); set("priceCount", {})
+
 -- buy the top lot: same path as bid, amount = buyout, NO popup (reagents cover it).
 -- the live lot's own bid is over the filter's 99c cap - buys must ignore the bid filter
 MOCK.auctions.list = { { name = "win", itemID = 800, cnt = 1, buyout = 2000, minBid = 50000, minInc = 1, bidAmt = 0, high = false } }

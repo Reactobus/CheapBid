@@ -288,6 +288,25 @@ local function DisProfit(it)
     return v * (it.cnt or 1) - it.buyout
 end
 
+-- does a BUYOUT of this lot need the protection popup? A lot whose reagent EV covers
+-- the buyout (dis-loot economics) is market-justified - no popup; anything else falls
+-- under the normal market-ceiling protection.
+local function BuyGuarded(it)
+    local p = DisProfit(it)
+    if p and p > 0 then return false end
+    return NeedsConfirm(it, it.buyout)
+end
+
+-- may the spam-advance (RemoveItem walk-down, RejectOldest pull-back) auto-land on this
+-- lot? The predicate must match the CURRENT flow: the bid flow skips lots above the
+-- market ceiling (IsBig, bid-based), the dis-loot/buy flow skips lots that would raise
+-- the BUY popup. Using bid-based IsBig for buys made the highlight hop up and down
+-- (advance skipped big-bid lots that NextBuyable then happily targeted).
+local function AutoTargetable(it)
+    if disLootView then return (it.buyout or 0) > 0 and not BuyGuarded(it) end
+    return not IsBig(it)
+end
+
 local function SortItems()
     table.sort(ActiveList(), function(a, b)
         local va, vb
@@ -787,10 +806,11 @@ local function RemoveItem(it)
     -- from here rather than jumping back to the top of the list.
     if it == selectedItem then
         if removedIdx and #list > 0 then
-            -- advance to the next NON->5g lot at/after the freed slot: the bid-spam
-            -- advance must never auto-land on an expensive lot (manual click only).
+            -- advance to the next AUTO-TARGETABLE lot at/after the freed slot (per the
+            -- current flow: IsBig for bids, BuyGuarded for dis-loot buys): the spam
+            -- advance must never auto-land on a confirm-needing lot (manual click only).
             selectedItem = nil
-            for i = removedIdx, #list do if not IsBig(list[i]) then selectedItem = list[i]; break end end
+            for i = removedIdx, #list do if AutoTargetable(list[i]) then selectedItem = list[i]; break end end
             if selectedItem then ScrollToItem(selectedItem) end
         else
             selectedItem = nil
@@ -870,9 +890,9 @@ local function RejectOldest()
     if floodMode then floodAnchor = now; RefreshBidLock() end
     -- pull the highlight BACK to the rejected lot so the player retries IT, instead
     -- of letting rapid bids walk the target forward past lots the server bounced.
-    -- EXCEPT a >5g lot: never auto-target it, even to retry (manual re-click only).
+    -- EXCEPT a confirm-needing lot: never auto-target it, even to retry (manual only).
     local ri, si = IndexOf(it), IndexOf(selectedItem)
-    if ri and not IsBig(it) and (not si or ri < si) then selectedItem = it; ScrollToItem(it) end
+    if ri and AutoTargetable(it) and (not si or ri < si) then selectedItem = it; ScrollToItem(it) end
     if actFS then
         if floodMode then
             actFS:SetText(string.format("Server flood - now 1 bid / %.0fs (waiting banks bids). Placed: %d, rejected: %d.",
@@ -1281,17 +1301,9 @@ end
 -- attempted/pending + ReconcileBids/ConfirmOldest/RejectOldest confirmation, flood
 -- token bucket, watchdog. Spam-clicking "buy" walks down the list like bid does.
 
--- Does this buyout need the protection popup? A lot whose reagent EV covers the buyout
--- (Dis. loot economics) is market-justified - no popup, that's the whole point of the
--- buy-buy-buy flow. Anything else falls under the normal market-ceiling protection.
-local function BuyGuarded(it)
-    local p = DisProfit(it)
-    if p and p > 0 then return false end
-    return NeedsConfirm(it, it.buyout)
-end
-
 -- first lot at or after `fromIdx` we haven't acted on that CAN be bought without a
--- popup (auto-advance never lands on a guarded lot - manual click only, like bid)
+-- popup (auto-advance never lands on a guarded lot - manual click only, like bid;
+-- BuyGuarded itself is defined up with DisProfit, shared with the highlight advance)
 local function NextBuyable(fromIdx)
     for i = fromIdx, #cheapItems do
         local v = cheapItems[i]
