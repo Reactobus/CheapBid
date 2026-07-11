@@ -296,10 +296,14 @@ local function SortItems()
         elseif sortKey == "cnt" then va, vb = a.cnt, b.cnt
         elseif sortKey == "rarity" then va, vb = (ItemQuality(a) or -1), (ItemQuality(b) or -1)
         elseif sortKey == "buyout" then va, vb = a.buyout, b.buyout
-        elseif sortKey == "aucmin" then                     -- sort by the displayed LOT value (unit x stack)
-            local ua, ub = AucUnit(a), AucUnit(b)
-            va = ua and ua * (a.cnt or 1) or -1
-            vb = ub and ub * (b.cnt or 1) or -1
+        elseif sortKey == "aucmin" then
+            if disLootView then                             -- header reads "Dis. profit" here
+                va, vb = (DisProfit(a) or -math.huge), (DisProfit(b) or -math.huge)
+            else                                            -- sort by the displayed LOT value (unit x stack)
+                local ua, ub = AucUnit(a), AucUnit(b)
+                va = ua and ua * (a.cnt or 1) or -1
+                vb = ub and ub * (b.cnt or 1) or -1
+            end
         elseif sortKey == "time" then va, vb = (a.timeLeft or 99), (b.timeLeft or 99)
         elseif sortKey == "disprofit" then va, vb = (DisProfit(a) or -math.huge), (DisProfit(b) or -math.huge)
         elseif disLootView then                          -- "bid" header = the Disenchant price column here
@@ -404,10 +408,16 @@ local function UpdateTable()
             row.rarFS:SetText(RarityLabel(ItemQuality(it)))
             row.sellerFS:SetText((it.owner and it.owner ~= "" and it.owner) or "?")
             row.buyFS:SetText(it.buyout > 0 and FormatMoney(it.buyout) or "-")
-            -- market value of the WHOLE lot: min per-unit buyout (last GetAll) x stack size,
-            -- so a 20-stack shows what the 20 are worth, comparable with Bid/Buyout
-            local au = AucUnit(it)
-            row.aucFS:SetText(au and FormatMoney(au * (it.cnt or 1)) or "-")
+            if disLootView and not bidsView then
+                -- dis-loot view: this column is "Dis. profit" = reagent EV x stack - buyout
+                local p = DisProfit(it)
+                row.aucFS:SetText((p and p > 0) and FormatMoney(p) or "-")   -- FormatMoney can't render negatives
+            else
+                -- market value of the WHOLE lot: min per-unit buyout (last GetAll) x stack size,
+                -- so a 20-stack shows what the 20 are worth, comparable with Bid/Buyout
+                local au = AucUnit(it)
+                row.aucFS:SetText(au and FormatMoney(au * (it.cnt or 1)) or "-")
+            end
             if bidsView then
                 -- my-bids: status by name color (green = leading, red = OUTBID)
                 row.nameFS:SetText((it.name and it.name ~= "" and it.name) or ItemName(it))
@@ -441,6 +451,7 @@ local function ApplyFilter()
     viewMode = "scan"                -- any filter/search returns to the scan results view
     disLootView = false              -- a normal search leaves the dis. loot view
     if headerBtns.bid and headerBtns.bid.label then headerBtns.bid.label:SetText("Bid") end
+    if headerBtns.aucmin and headerBtns.aucmin.label then headerBtns.aucmin.label:SetText("Auc min") end
     if ResetColumnHiWater then ResetColumnHiWater() end   -- new result set -> re-fit columns once
     cheapItems = {}
     for _, it in ipairs(scanCache) do
@@ -480,8 +491,10 @@ local function ApplyDisLoot(auto)
     end
     viewMode = "scan"
     disLootView = true
-    -- the Bid column is pointless here (we pay buyouts) - it shows the reagent EV instead
-    if headerBtns.bid and headerBtns.bid.label then headerBtns.bid.label:SetText("Disenchant price") end
+    -- Bid and Auc min are pointless here (we pay buyouts): Bid shows the reagent EV
+    -- ("Dis. price") and Auc min shows the net gain ("Dis. profit" = EV x stack - buyout)
+    if headerBtns.bid and headerBtns.bid.label then headerBtns.bid.label:SetText("Dis. price") end
+    if headerBtns.aucmin and headerBtns.aucmin.label then headerBtns.aucmin.label:SetText("Dis. profit") end
     if ResetColumnHiWater then ResetColumnHiWater() end
     cheapItems = {}
     for _, it in ipairs(scanCache) do
@@ -1457,8 +1470,8 @@ MeasureColumns = function()
         -- static floors: header captions + fixed label sets (these never jump)
         if not colHiWater then
             colHiWater = {
-                bid  = w(disLootView and "Disenchant price" or "Bid") + pad,   -- column is retitled in the dis-loot view
-                auc  = math.max(w("Auc min") + pad, 44),
+                bid  = w(disLootView and "Dis. price" or "Bid") + pad,         -- both retitled in the dis-loot view
+                auc  = math.max(w(disLootView and "Dis. profit" or "Auc min") + pad, 44),
                 buy  = math.max(w("Buyout") + pad, 44),
                 cnt  = math.max(w("Qty") + pad, 26),
                 rar  = clamp(math.max(w("Uncommon"), w("Legendary")) + pad, 40, 96),

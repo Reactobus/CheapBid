@@ -387,12 +387,20 @@ eq(dl[1].name, "win",  "disloot: biggest profit on top")
 eq(dl[2].name, "win3", "disloot: middle profit second")
 eq(dl[3].name, "win2", "disloot: smallest profit last")
 
--- in the dis-loot view the "Bid" column IS the Disenchant price: its sort ranks by EV x stack
+-- in the dis-loot view the "Bid" column IS the Dis. price: its sort ranks by EV x stack
 set("sortKey", "bid"); set("sortAsc", false)
 fn.SortItems()
 dl = fn.ActiveList()
 eq(dl[1].name, "win3", "disloot bid-column sort: 2-stack EV (1g) on top")
 ok(dl[2].name == "win" and dl[3].name == "win2", "disloot bid-column sort: equal EVs tie-break by name")
+
+-- and the "Auc min" column IS the Dis. profit: its sort ranks by EV x stack - buyout
+set("sortKey", "aucmin"); set("sortAsc", false)
+fn.SortItems()
+dl = fn.ActiveList()
+eq(dl[1].name, "win",  "disloot profit-column sort: 30s profit on top")
+eq(dl[2].name, "win3", "disloot profit-column sort: 10s profit second")
+eq(dl[3].name, "win2", "disloot profit-column sort: 1s profit last")
 
 -- buy the top lot: same path as bid, amount = buyout, NO popup (reagents cover it).
 -- the live lot's own bid is over the filter's 99c cap - buys must ignore the bid filter
