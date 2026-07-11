@@ -76,7 +76,8 @@ local scanPriceCount = nil
 
 -- UI refs
 local content, leftCol, listFrame, statusFS, actFS, foundFS, cacheFS, progBar
-local scanBtn, searchBtn, bidBtn, stopBtn, myBidsBtn, perfectBtn
+local BTN = {}   -- scan/search/bid/stop/myBids/buy/disLoot buttons in ONE table (Lua 5.1 caps a chunk at 200 locals)
+local disLootView = false            -- table currently shows the "Dis. loot" (buy+disenchant profit) view
 local mBidMin, mBidMax, mBuyMin, mBuyMax
 local fauxScroll, tableRows, headerArrows = nil, {}, {}
 local NUM_ROWS = 0
@@ -261,20 +262,30 @@ local function AucUnit(it)
     return nil
 end
 
--- "Perfect sort" ranks by how much of a STEAL a lot is: a LOW bid against a HIGH market
--- value is best (bid 1c on an item the market sells for 100g). The value reference is the
--- market minimum per-unit buyout for that item across the whole GetAll (AucUnit) x this
--- lot's stack size - NOT the lot's own buyout, which may be absent or padded. When the
--- item never appeared with a buyout in the scan we fall back to the lot's own buyout, so
--- behaviour matches the old scoring until a scan populates the price DB. score = value/bid,
--- so a lower bid AND a higher market value both push it up; no value or no bid -> 0 (sinks).
-local function Significance(it)
-    local bid = it.bid or 0
-    if bid <= 0 then return 0 end
-    local unit = AucUnit(it)
-    local value = unit and unit * (it.cnt or 1) or (it.buyout or 0)
-    if value <= 0 then return 0 end
-    return value / bid
+-- Expected reagent value of disenchanting ONE item of this lot (copper), via the
+-- Disenchant module's bridge (CheapBidsPublic.DisenchantValue - present only when the
+-- CheapBids_Disenchant addon is loaded). Memoized per lot: it._dev = false remembers a
+-- FINAL "not disenchantable / nothing priced" verdict; while the item's GetItemInfo is
+-- still loading (known=false) nothing is memoized, so a later pass can retry.
+local function DisValue(it)
+    if it._dev ~= nil then
+        if it._dev == false then return nil end
+        return it._dev
+    end
+    local f = CheapBidsPublic and CheapBidsPublic.DisenchantValue
+    if not f or not it.itemID or it.itemID == 0 then return nil end
+    local v, known = f(it.itemID)
+    if known then it._dev = v or false end
+    return v
+end
+
+-- profit of "buy out + disenchant" for the whole lot: reagent EV x stack - buyout.
+-- nil when it cannot be judged (no buyout / no DE data yet / not disenchantable).
+local function DisProfit(it)
+    if not it or not it.buyout or it.buyout <= 0 then return nil end
+    local v = DisValue(it)
+    if not v then return nil end
+    return v * (it.cnt or 1) - it.buyout
 end
 
 local function SortItems()
@@ -290,7 +301,7 @@ local function SortItems()
             va = ua and ua * (a.cnt or 1) or -1
             vb = ub and ub * (b.cnt or 1) or -1
         elseif sortKey == "time" then va, vb = (a.timeLeft or 99), (b.timeLeft or 99)
-        elseif sortKey == "perfect" then va, vb = Significance(a), Significance(b)
+        elseif sortKey == "disprofit" then va, vb = (DisProfit(a) or -math.huge), (DisProfit(b) or -math.huge)
         else va, vb = a.bid, b.bid end
         if va == vb then return (a.name or "") < (b.name or "") end
         if sortAsc then return va < vb else return va > vb end
@@ -323,12 +334,16 @@ local function UpdateButtons()
     local bidsView = viewMode == "bids"
     cacheFS:SetText("Cache: " .. #scanCache)
     foundFS:SetText("Found: " .. (bidsView and #myBids or #cheapItems))
-    if myBidsBtn then myBidsBtn:SetText(bidsView and "to scan" or "my bids") end
-    if searchBtn then searchBtn:SetEnabled(not bidsView and #scanCache > 0 and idle) end
-    if perfectBtn then perfectBtn:SetEnabled(not bidsView and #cheapItems > 0 and idle) end
+    if BTN.myBids then BTN.myBids:SetText(bidsView and "to scan" or "my bids") end
+    if BTN.search then BTN.search:SetEnabled(not bidsView and #scanCache > 0 and idle) end
+    if BTN.disLoot then
+        BTN.disLoot:SetEnabled(not bidsView and #scanCache > 0 and idle
+            and (CheapBidsPublic and CheapBidsPublic.DisenchantValue) ~= nil)   -- needs the Disenchant module
+    end
     local now = GetTime and GetTime() or 0
     local locked = floodMode and now > 0 and now < floodAnchor + FLOOD_LOCK   -- no bid earned yet
-    if bidBtn then
+    if BTN.buy then BTN.buy:SetEnabled(not bidsView and #cheapItems > 0 and idle and not locked) end
+    if BTN.bid then
         if bidsView then
             -- enabled only when a RED (outbid) lot is the effective bid target (green = no point)
             local t = selectedItem
@@ -336,13 +351,13 @@ local function UpdateButtons()
                 t = nil
                 for _, v in ipairs(myBids) do if not v.led and not IsBig(v) then t = v; break end end  -- never auto-pick a >5g lot
             end
-            bidBtn:SetEnabled(t ~= nil and not t.led and idle and not locked)
+            BTN.bid:SetEnabled(t ~= nil and not t.led and idle and not locked)
         else
-            bidBtn:SetEnabled(#cheapItems > 0 and idle and not locked)
+            BTN.bid:SetEnabled(#cheapItems > 0 and idle and not locked)
         end
     end
-    if stopBtn then stopBtn:SetEnabled(isScanning) end
-    if scanBtn then scanBtn:SetText(isScanning and "stop" or SCAN_BTN) end
+    if BTN.stop then BTN.stop:SetEnabled(isScanning) end
+    if BTN.scan then BTN.scan:SetText(isScanning and "stop" or SCAN_BTN) end
 end
 
 -- flood-mode token bucket: 1 bid is earned per FLOOD_LOCK seconds since floodAnchor,
@@ -415,6 +430,7 @@ end
 local function ApplyFilter()
     ReadFilter()
     viewMode = "scan"                -- any filter/search returns to the scan results view
+    disLootView = false              -- a normal search leaves the Dis. loot view
     if ResetColumnHiWater then ResetColumnHiWater() end   -- new result set -> re-fit columns once
     cheapItems = {}
     for _, it in ipairs(scanCache) do
@@ -438,6 +454,46 @@ local function RequestApplyFilter()
     if #scanCache == 0 then return end
     if Throttled("filter", 0.3) then return end
     ApplyFilter()
+end
+
+-- "Dis. loot": fill the table with the lots that are PROFITABLE to buy out and
+-- disenchant - buyout > 0 and the expected reagent value (Disenchant module data x the
+-- last GetAll's prices) exceeds the buyout. Sorted by profit, best on top. The money
+-- filter boxes are IGNORED here on purpose (profit is the only criterion); the
+-- time-left checkboxes still apply. Like the rarity filter, item info resolves async
+-- for uncached items, so a manual click schedules a few re-applies while the cache
+-- warms (auto=true marks those re-applies: no timers, no re-scheduling loop).
+local function ApplyDisLoot(auto)
+    if not (CheapBidsPublic and CheapBidsPublic.DisenchantValue) then
+        if statusFS then statusFS:SetText("Dis. loot needs the CheapBids_Disenchant module.") end
+        return
+    end
+    viewMode = "scan"
+    disLootView = true
+    if ResetColumnHiWater then ResetColumnHiWater() end
+    cheapItems = {}
+    for _, it in ipairs(scanCache) do
+        if not it.done and not it.led and TimeShown(it.timeLeft) then
+            local p = DisProfit(it)
+            if p and p > 0 then cheapItems[#cheapItems + 1] = it end
+        end
+    end
+    sortKey = "disprofit"; sortAsc = false
+    for _, ar in pairs(headerArrows) do ar:Hide() end
+    SortItems()
+    selectedItem = nil
+    local sb = _G["CheapBidsFauxScrollBar"]
+    if sb then sb:SetValue(0) end
+    UpdateTable()
+    if statusFS then statusFS:SetText(string.format(
+        "Dis. loot: %d profitable of %d (buyout < reagent value).", #cheapItems, #scanCache)) end
+    if not auto then
+        for _, delay in ipairs({ 0.5, 1.5, 3.0, 5.0 }) do
+            C_Timer.After(delay, function()
+                if uiBuilt and not isScanning and disLootView and viewMode == "scan" then ApplyDisLoot(true) end
+            end)
+        end
+    end
 end
 
 -- index of a lot in the (small) filtered list, or nil
@@ -601,7 +657,7 @@ local function ProcessGetAll(start, total)
     else
         isScanning = false; getAllPending = false; scanMode = nil
         cacheFromGetAll = true; HideProgress()
-        -- commit the freshly-built market minimums so tooltips/column/Perfect sort use
+        -- commit the freshly-built market minimums so tooltips/column/Dis. loot use
         -- them, and persist them (Auctionator-style: they outlive the AH session until
         -- the next GetAll overwrites them).
         if scanPriceDB then
@@ -840,13 +896,13 @@ end
 
 -- Place a real bid on ONE lot at a known live index. Must run inside a hardware
 -- event (button / double-click / key binding).
-local function PlaceOn(it, idx, eff)
+local function PlaceOn(it, idx, eff, verb)
     attempted[it] = true
     it._bidIdx = idx
     table.insert(pending, it)
     PlaceAuctionBid("list", idx, eff)        -- accepted because we're inside a click
     bidsSent = bidsSent + 1
-    if actFS then actFS:SetText(string.format("Bid: %s (%s). Placed %d.", ItemName(it), FormatMoney(eff), bidsOK)) end
+    if actFS then actFS:SetText(string.format("%s: %s (%s). Placed %d.", verb or "Bid", ItemName(it), FormatMoney(eff), bidsOK)) end
     UpdateTable()
     ArmBidWatch()
 end
@@ -861,7 +917,9 @@ local RELOCATE_WINDOW = 150
 -- Returns correctedIndex, currentEff on success. On failure returns nil, nil, ledSeen
 -- where ledSeen=true means our exact lot was found but WE ALREADY LEAD it (high) -
 -- so it is not "gone", it is just already ours.
-local function RelocateInLive(it)
+local function RelocateInLive(it, skipFilter)
+    -- skipFilter=true (the BUY path): identity match only. The bid-price filter boxes
+    -- must not veto a buyout - dis-loot lots can carry any bid, we pay the buyout.
     if not it.idx then return nil end
     local n = GetNumAuctionItems("list") or 0
     if n == 0 then return nil end
@@ -880,7 +938,7 @@ local function RelocateInLive(it)
         if (buyout or 0) ~= (it.buyout or 0) then return nil end
         if high then ledSeen = true; return nil end            -- our exact lot, but WE already lead it
         local eff = CalcBid(minBid, minInc, bidAmt)
-        if not PassesFilter(eff, buyout or 0) then return nil end -- price moved out of the filter
+        if not skipFilter and not PassesFilter(eff, buyout or 0) then return nil end -- price moved out of the filter
         return eff
     end
     local eff = matchAt(it.idx)                                 -- fast path: index still valid
@@ -1192,6 +1250,85 @@ local function DoSingleBid()
     BidItem(selectedItem)
 end
 
+-- ===== Buy (buyout) - the SAME mechanism as bid, only the amount is the buyout =====
+-- PlaceAuctionBid at the buyout price IS the buyout purchase; it reuses the whole bid
+-- machinery untouched: hardware-event only, relocate-by-content before committing,
+-- attempted/pending + ReconcileBids/ConfirmOldest/RejectOldest confirmation, flood
+-- token bucket, watchdog. Spam-clicking "buy" walks down the list like bid does.
+
+-- Does this buyout need the protection popup? A lot whose reagent EV covers the buyout
+-- (Dis. loot economics) is market-justified - no popup, that's the whole point of the
+-- buy-buy-buy flow. Anything else falls under the normal market-ceiling protection.
+local function BuyGuarded(it)
+    local p = DisProfit(it)
+    if p and p > 0 then return false end
+    return NeedsConfirm(it, it.buyout)
+end
+
+-- first lot at or after `fromIdx` we haven't acted on that CAN be bought without a
+-- popup (auto-advance never lands on a guarded lot - manual click only, like bid)
+local function NextBuyable(fromIdx)
+    for i = fromIdx, #cheapItems do
+        local v = cheapItems[i]
+        if not attempted[v] and (v.buyout or 0) > 0 and not BuyGuarded(v) then return v end
+    end
+    return nil
+end
+
+local function CommitScanBuy(target)
+    if not target then return end
+    local now = GetTime and GetTime() or 0
+    local idx, _, ledSeen = RelocateInLive(target, true)     -- identity only: filter can't veto a buyout
+    if not idx then
+        if actFS then actFS:SetText(ItemName(target) ..
+            (ledSeen and " - you already lead this, removed." or " - item taken/unavailable, removed.")) end
+        RemoveItem(target); UpdateTable(); return
+    end
+    if now > 0 and (now - lastBidAt) < BID_MIN_INTERVAL then return end           -- server anti-spam gate
+    lastBidAt = now
+    target.idx = idx
+    PlaceOn(target, idx, target.buyout, "Buy")          -- buyout amount = instant purchase
+    if floodMode then floodAnchor = floodAnchor + FLOOD_LOCK; RefreshBidLock() end  -- consume 1 token
+    ScrollToItem(target); UpdateTable()
+end
+
+local function BuyItem(it)
+    if isScanning then return end
+    if viewMode ~= "scan" then return end               -- buys work on the scan table only
+    local now = GetTime and GetTime() or 0
+    if now > 0 and (now - lastActionAt) < SKIP_MIN_INTERVAL then return end       -- debounce (anti-freeze)
+    lastActionAt = now
+    if floodMode and now > 0 and now < floodAnchor + FLOOD_LOCK then
+        if actFS then actFS:SetText(string.format("Server flood - next buy in %.1fs (1 / %.0fs).",
+            floodAnchor + FLOOD_LOCK - now, FLOOD_LOCK)) end
+        return
+    end
+    -- resolve the target: the selected lot, advancing past bought/no-buyout lots
+    local target = it
+    if not target or attempted[target] or (target.buyout or 0) <= 0 then
+        target = NextBuyable(IndexOf(target or selectedItem) or 1)
+    end
+    if not target then
+        if actFS then actFS:SetText("No fresh lot to buy - rescan or press \"Dis. loot\" again.") end
+        return
+    end
+    selectedItem = target
+    local idx, _, ledSeen = RelocateInLive(target, true)
+    if not idx then
+        if actFS then actFS:SetText(ItemName(target) ..
+            (ledSeen and " - you already lead this, removed." or " - item taken/unavailable, removed.")) end
+        RemoveItem(target)
+        UpdateTable()
+        return
+    end
+    if BuyGuarded(target) then                          -- expensive AND not reagent-covered: ask first
+        if actFS then actFS:SetText(string.format("Confirm buyout of %s for %s (price protection).", ItemName(target), FormatMoney(target.buyout))) end
+        ConfirmBig(target, target.buyout, function() CommitScanBuy(target) end)
+        return
+    end
+    CommitScanBuy(target)
+end
+
 local function StopAll()
     if isScanning or scanMode then AbortScan() end
     UpdateButtons()
@@ -1355,17 +1492,6 @@ local function SetSortColumn(key)
         if k == key then ar:Show(); ar:SetTexCoord(0, 0.5625, sortAsc and 0 or 1, sortAsc and 1 or 0)
         else ar:Hide() end
     end
-    SortItems(); UpdateTable()
-end
-
--- "Perfect sort" button: rank the found list by significance (low bid + high buyout on
--- top). Not a column, so it clears the header arrows. First click = best on top
--- (descending); a second click flips the direction.
-local function PerfectSort()
-    if viewMode ~= "scan" then return end               -- only the scan-results table
-    if Throttled("sort", 0.2) then return end
-    if sortKey == "perfect" then sortAsc = not sortAsc else sortKey = "perfect"; sortAsc = false end
-    for _, ar in pairs(headerArrows) do ar:Hide() end
     SortItems(); UpdateTable()
 end
 
@@ -1534,39 +1660,39 @@ local function BuildUI()
     leftCol:SetWidth(170)                                          -- shrink so the right edge stays put
     if leftCol.SetBackdrop then leftCol:SetBackdrop(PANEL_BACKDROP); leftCol:SetBackdropColor(0,0,0,0.55); leftCol:SetBackdropBorderColor(0.45,0.45,0.45) end
 
-    -- 4 buttons in a 2x2 grid, each ~half the old width, to free vertical space:
-    --   [ scan auc ] [ search ]
-    --   [   bid    ] [ cancel ]
+    -- 6 buttons in a 3x2 grid:
+    --   [ scan auc ] [ cancel    ]      (cancel aborts the scan -> next to scan)
+    --   [   bid    ] [ search    ]
+    --   [   buy    ] [ Dis. loot ]      (buy under bid: same mechanism, buyout amount)
     local BTN_W, BTN_H = 75, 24
-    scanBtn = CreateFrame("Button", nil, leftCol, "UIPanelButtonTemplate")
-    scanBtn:SetSize(BTN_W, BTN_H); scanBtn:SetPoint("TOPLEFT", leftCol, "TOPLEFT", 8, -8); scanBtn:SetText(SCAN_BTN)
-    searchBtn = CreateFrame("Button", nil, leftCol, "UIPanelButtonTemplate")
-    searchBtn:SetSize(BTN_W, BTN_H); searchBtn:SetPoint("LEFT", scanBtn, "RIGHT", 4, 0); searchBtn:SetText("search"); searchBtn:SetEnabled(false)
-    bidBtn = CreateFrame("Button", nil, leftCol, "UIPanelButtonTemplate")
-    bidBtn:SetSize(BTN_W, BTN_H); bidBtn:SetPoint("TOPLEFT", scanBtn, "BOTTOMLEFT", 0, -6); bidBtn:SetText("bid"); bidBtn:SetEnabled(false)
-    stopBtn = CreateFrame("Button", nil, leftCol, "UIPanelButtonTemplate")
-    stopBtn:SetSize(BTN_W, BTN_H); stopBtn:SetPoint("LEFT", bidBtn, "RIGHT", 4, 0); stopBtn:SetText("cancel"); stopBtn:SetEnabled(false)
-
-    -- "Perfect sort": one-click rank of the found list by significance (lowest bid vs
-    -- highest buyout on top). Full width, directly under the bid/cancel row.
-    perfectBtn = CreateFrame("Button", nil, leftCol, "UIPanelButtonTemplate")
-    perfectBtn:SetSize(154, BTN_H); perfectBtn:SetPoint("TOPLEFT", bidBtn, "BOTTOMLEFT", 0, -6)
-    perfectBtn:SetText("Perfect sort"); perfectBtn:SetEnabled(false)
-    perfectBtn:SetScript("OnClick", PerfectSort)
+    BTN.scan = CreateFrame("Button", nil, leftCol, "UIPanelButtonTemplate")
+    BTN.scan:SetSize(BTN_W, BTN_H); BTN.scan:SetPoint("TOPLEFT", leftCol, "TOPLEFT", 8, -8); BTN.scan:SetText(SCAN_BTN)
+    BTN.stop = CreateFrame("Button", nil, leftCol, "UIPanelButtonTemplate")
+    BTN.stop:SetSize(BTN_W, BTN_H); BTN.stop:SetPoint("LEFT", BTN.scan, "RIGHT", 4, 0); BTN.stop:SetText("cancel"); BTN.stop:SetEnabled(false)
+    BTN.bid = CreateFrame("Button", nil, leftCol, "UIPanelButtonTemplate")
+    BTN.bid:SetSize(BTN_W, BTN_H); BTN.bid:SetPoint("TOPLEFT", BTN.scan, "BOTTOMLEFT", 0, -6); BTN.bid:SetText("bid"); BTN.bid:SetEnabled(false)
+    BTN.search = CreateFrame("Button", nil, leftCol, "UIPanelButtonTemplate")
+    BTN.search:SetSize(BTN_W, BTN_H); BTN.search:SetPoint("LEFT", BTN.bid, "RIGHT", 4, 0); BTN.search:SetText("search"); BTN.search:SetEnabled(false)
+    BTN.buy = CreateFrame("Button", nil, leftCol, "UIPanelButtonTemplate")
+    BTN.buy:SetSize(BTN_W, BTN_H); BTN.buy:SetPoint("TOPLEFT", BTN.bid, "BOTTOMLEFT", 0, -6); BTN.buy:SetText("buy"); BTN.buy:SetEnabled(false)
+    BTN.buy:SetScript("OnClick", function() BuyItem(selectedItem) end)
+    BTN.disLoot = CreateFrame("Button", nil, leftCol, "UIPanelButtonTemplate")
+    BTN.disLoot:SetSize(BTN_W, BTN_H); BTN.disLoot:SetPoint("LEFT", BTN.buy, "RIGHT", 4, 0); BTN.disLoot:SetText("Dis. loot"); BTN.disLoot:SetEnabled(false)
+    BTN.disLoot:SetScript("OnClick", function() ApplyDisLoot(false) end)
 
     -- toggle: scan results  <->  my bids (live "bidder" list; re-bid outbid lots).
     -- pinned to the bottom of the left panel so it never collides with the grid.
-    myBidsBtn = CreateFrame("Button", nil, leftCol, "UIPanelButtonTemplate")
-    myBidsBtn:SetSize(154, 22); myBidsBtn:SetPoint("BOTTOMLEFT", leftCol, "BOTTOMLEFT", 8, 8)
-    myBidsBtn:SetText("my bids")
-    myBidsBtn:SetScript("OnClick", ToggleBidsView)
+    BTN.myBids = CreateFrame("Button", nil, leftCol, "UIPanelButtonTemplate")
+    BTN.myBids:SetSize(154, 22); BTN.myBids:SetPoint("BOTTOMLEFT", leftCol, "BOTTOMLEFT", 8, 8)
+    BTN.myBids:SetText("my bids")
+    BTN.myBids:SetScript("OnClick", ToggleBidsView)
 
     -- my-bids / scan options (all default ON). Stack bottom->top above the my-bids button:
     -- Price protection, then Always target red, then Autoscan bids.
     -- Price protection (default ON): the >5g guard. OFF = rebid expensive lots fast with the
     -- bid button (no confirm popup) and let the auto-target land on a >5g lot.
     local protectCB = CreateFrame("CheckButton", nil, leftCol, "UICheckButtonTemplate")
-    protectCB:SetSize(20, 20); protectCB:SetPoint("BOTTOMLEFT", myBidsBtn, "TOPLEFT", 2, 6)
+    protectCB:SetSize(20, 20); protectCB:SetPoint("BOTTOMLEFT", BTN.myBids, "TOPLEFT", 2, 6)
     protectCB:SetChecked(priceProtect)
     local protectLbl = protectCB:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     protectLbl:SetPoint("LEFT", protectCB, "RIGHT", 1, 0); protectLbl:SetText("Price protection")
@@ -1597,10 +1723,10 @@ local function BuildUI()
         if viewMode == "bids" and autoScanBids then RefreshMyBids(true) end
     end)
 
-    -- counters sit directly under the Perfect sort button. (The scan progress bar was
+    -- counters sit directly under the buy/Dis.loot row. (The scan progress bar was
     -- moved out of the left panel into the top header - see next to the Rarity dropdown.)
     cacheFS = leftCol:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    cacheFS:SetPoint("TOPLEFT", perfectBtn, "BOTTOMLEFT", 0, -4); cacheFS:SetText("Cache: 0")   -- directly under Perfect sort
+    cacheFS:SetPoint("TOPLEFT", BTN.buy, "BOTTOMLEFT", 0, -4); cacheFS:SetText("Cache: 0")
     foundFS = leftCol:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     foundFS:SetPoint("TOPLEFT", cacheFS, "BOTTOMLEFT", 0, -3); foundFS:SetText("Found: 0")
 
@@ -1723,18 +1849,18 @@ local function BuildUI()
     progBar.txt = progBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall"); progBar.txt:SetPoint("CENTER", progBar, "CENTER", 0, 0)
     progBar:Hide()
 
-    scanBtn:SetScript("OnClick", function()
+    BTN.scan:SetScript("OnClick", function()
         if isScanning then AbortScan(); return end
         if not (AuctionFrame and AuctionFrame:IsVisible()) then return end
         StartScan()
     end)
-    searchBtn:SetScript("OnClick", function()
+    BTN.search:SetScript("OnClick", function()
         if isScanning then return end
         if #scanCache == 0 then statusFS:SetText("Run \"" .. SCAN_BTN .. "\" first.") return end
         RequestApplyFilter()
     end)
-    bidBtn:SetScript("OnClick", DoSingleBid)
-    stopBtn:SetScript("OnClick", StopAll)
+    BTN.bid:SetScript("OnClick", DoSingleBid)
+    BTN.stop:SetScript("OnClick", StopAll)
 
     uiBuilt = true
 end
@@ -1753,19 +1879,19 @@ local function PollGetAllReady()
         if tk ~= readyToken then return end                          -- superseded by a newer poll
         if not (uiBuilt and AuctionFrame and AuctionFrame:IsVisible()
                 and content and content:IsShown()) then return end   -- tab/AH closed -> stop the chain
-        if not isScanning and scanBtn then
+        if not isScanning and BTN.scan then
             local _, canAll = CanSendAuctionQuery()
-            local fs = scanBtn:GetFontString()
+            local fs = BTN.scan:GetFontString()
             if canAll then
-                scanBtn:SetText(SCAN_BTN)
+                BTN.scan:SetText(SCAN_BTN)
                 if fs then fs:SetTextColor(0.3, 1.0, 0.3) end            -- green = scan now
             else
                 local last = (CheapBidsDB and CheapBidsDB.lastGetAll) or 0
                 local left = last > 0 and (GETALL_COOLDOWN - (time() - last)) or 0
                 if left > 0 then
-                    scanBtn:SetText(string.format("scan %d:%02d", math.floor(left / 60), left % 60))  -- compact: narrow button
+                    BTN.scan:SetText(string.format("scan %d:%02d", math.floor(left / 60), left % 60))  -- compact: narrow button
                 else
-                    scanBtn:SetText(SCAN_BTN)                            -- estimate elapsed, server still gating
+                    BTN.scan:SetText(SCAN_BTN)                            -- estimate elapsed, server still gating
                 end
                 if fs then fs:SetTextColor(1, 1, 1) end                 -- white = not ready yet
             end
@@ -2236,8 +2362,9 @@ if CheapBidsTest then
         BidItem = BidItem, CommitScanBid = CommitScanBid,
         ActiveList = ActiveList, SortItems = SortItems, UpdateButtons = UpdateButtons, ReadFilter = ReadFilter,
         ItemLink = ItemLink,
-        ReadIndexInto = ReadIndexInto, AucUnit = AucUnit, Significance = Significance, PriceTip = PriceTip,
+        ReadIndexInto = ReadIndexInto, AucUnit = AucUnit, PriceTip = PriceTip,
         AucCoinText = AucCoinText,
+        DisValue = DisValue, DisProfit = DisProfit, ApplyDisLoot = ApplyDisLoot, BuyItem = BuyItem,
         IsBig = IsBig, NeedsConfirm = NeedsConfirm, ProtectThreshold = ProtectThreshold,
         OptPct = OptPct, SetPct = SetPct, OptFallback = OptFallback, SetFallback = SetFallback,
     }

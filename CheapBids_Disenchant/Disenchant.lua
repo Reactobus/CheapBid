@@ -332,6 +332,23 @@ HookPriceRow(ItemRefTooltip)
 HookPriceRow(ShoppingTooltip1)
 HookPriceRow(ShoppingTooltip2)
 
+-- ---- bridge for the main addon's "Dis. loot" view ---------------------------
+-- EV (copper) of disenchanting ONE of this item at current market prices, or nil.
+-- Second return: false = the item's GetItemInfo is not cached yet, the caller
+-- should RETRY later; true = final verdict (a value, or nil for not-disenchantable
+-- / nothing priced). Registered on the CheapBidsPublic table our dependency owns.
+if CheapBidsPublic then
+    CheapBidsPublic.DisenchantValue = function(itemID)
+        if not itemID or NON_DE[itemID] then return nil, true end
+        local _, _, quality, ilvl, _, _, _, _, equipLoc = GetItemInfo(itemID)
+        if not quality then return nil, false end            -- still loading -> retry
+        if quality < UNCOMMON or quality > EPIC then return nil, true end
+        local rows = Lookup(quality, SLOT_CLASS[equipLoc], ilvl)
+        if not rows then return nil, true end
+        return DEValue(rows), true
+    end
+end
+
 -- ---- /cbde : toggle (persisted, applies immediately) -----------------------
 SLASH_CHEAPBIDSDE1 = "/cbde"
 SlashCmdList["CHEAPBIDSDE"] = function()

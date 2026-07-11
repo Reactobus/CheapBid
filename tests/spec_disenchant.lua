@@ -145,6 +145,22 @@ local tipN = fakeTipD(5000)
 DE.PriceRow(tipN)
 eq(#tipN.dlines, 0, "price row: no scan data -> no row")
 
+-- ===== CheapBidsPublic.DisenchantValue: the bridge the main addon's Dis. loot uses =====
+CheapBidsTest.set("priceDB", PRICES)
+local dv, known = CheapBidsPublic.DisenchantValue(5000)
+eq(dv, expEV, "bridge: green chest EV matches the bracket table")
+eq(known, true, "bridge: cached gear -> final verdict")
+dv, known = CheapBidsPublic.DisenchantValue(9999)
+eq(dv, nil, "bridge: uncached item -> no value")
+eq(known, false, "bridge: uncached item -> known=false (retry later)")
+dv, known = CheapBidsPublic.DisenchantValue(5004)
+eq(dv, nil, "bridge: common shirt -> no value")
+eq(known, true, "bridge: common shirt -> final verdict")
+dv, known = CheapBidsPublic.DisenchantValue(3456)
+eq(dv, nil, "bridge: NON_DE exception -> no value")
+eq(known, true, "bridge: NON_DE -> final verdict")
+CheapBidsTest.set("priceDB", {})
+
 -- ===== /cbde toggle =====
 SlashCmdList["CHEAPBIDSDE"]()
 eq(CheapBidsDB.disenchantTip, false, "/cbde: ON -> OFF")

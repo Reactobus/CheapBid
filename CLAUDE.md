@@ -206,9 +206,18 @@ LibStub/Babylonian/Stubby, чисто статическая таблица. Х�
 
 - **Верх — фильтр:** `Bid from/to` и `Buyout from/to`, по три поля g/s/c с иконками
   монет. Пусто = любой. Справа от строки — системный статус (скан/прогресс).
-- **Левая панель** (`leftCol`): кнопки `scan auc` / `search` / `bid` / `cancel`
-  (в режиме скана `scan auc` → `Stop`), прогресс-бар, счётчики `Cache:`/`Found:`,
-  чекбоксы времени `<30m / 30m-2h / 2-12h / >12h`, статус ставок (под чекбоксами).
+- **Левая панель** (`leftCol`): сетка кнопок 3×2 — `scan auc`/`cancel`, `bid`/`search`,
+  `buy`/`Dis. loot` (кнопки лежат в таблице `BTN` — chunk упирался в лимит Lua 5.1
+  «200 локалов»), счётчики `Cache:`/`Found:`, чекбоксы времени, статус ставок.
+  - **`Dis. loot`** — заполняет таблицу лотами, которые выгодно выкупить и распылить:
+    `buyout > 0` и профит `= EV_распыла × кол-во − buyout > 0` (EV — через мост
+    `CheapBidsPublic.DisenchantValue` из модуля Disenchant; без модуля кнопка неактивна).
+    Сортировка по профиту (`sortKey="disprofit"`), money-фильтр игнорируется, тайм-чекбоксы
+    работают. Из-за async `GetItemInfo` пере-применяется 0.5/1.5/3/5с (как rarity, ERR-0005).
+  - **`buy`** — ТА ЖЕ механика, что `bid` (только сумма = buyout): hardware event,
+    `RelocateInLive(it, skipFilter=true)` (bid-фильтр не блокирует выкуп), pending/
+    Reconcile/flood. Спам-клик идёт вниз по списку. Защита: профитный по распылу лот
+    выкупается без попапа (реги окупают), прочее — через `NeedsConfirm`.
 - **Правая панель** (`rightPanel`/`listFrame`): таблица, колонки
   `Item / Rarity / Qty / Seller / Bid / Buyout / Auc min / Time left`, сортировка по
   клику на заголовок, `FauxScrollFrame`. Клик по строке — выбор; дабл-клик — ставка.
@@ -241,10 +250,10 @@ LibStub/Babylonian/Stubby, чисто статическая таблица. Х�
   `Auc min` показывает её; тултип (`PriceTip`, аддитивный `HookScript`, taint не создаёт)
   подписывает цену на **любом** предмете. **Shift** в тултипе = цена за весь стак
   (`unit × кол-во`; кол-во стака ловится из слота сумки через `StashStack`).
-- **Perfect sort** (`Significance`) ранжирует по `value/bid`, где `value = AucUnit × cnt`
-  (рыночная стоимость всего лота), с откатом на собственный buyout лота, если предмета
-  нет в `priceDB`. Наверх — дешёвая ставка на дорогой по рынку предмет.
-- Тесты: блок «Auc min price DB + Perfect sort + price tooltip» в `tests/spec.lua`.
+- Кнопка Perfect sort (score `value/bid`) **удалена** 2026-07-11 — её место заняла
+  `Dis. loot` (см. левую панель): вместо «дешёвая ставка на дорогой предмет» —
+  «выгодно выкупить и распылить».
+- Тесты: блоки «Auc min price DB», «Dis. loot + buy» в `tests/spec.lua`.
 
 ---
 

@@ -202,22 +202,6 @@ fn.BidItem(smallItem)
 eq(#MOCK.popups, 0, "scan small: no confirmation popup")
 eq(#MOCK.bids, 1, "scan small: placed immediately")
 
--- ===== Perfect sort: significance = buyout/bid, best steal (low bid, high buyout) on top =====
-set("viewMode", "scan")
-set("sortKey", "perfect"); set("sortAsc", false)
-set("cheapItems", {
-    { name = "mid",   bid = 10, buyout = 100 },   -- ratio 10
-    { name = "steal", bid = 1,  buyout = 100 },   -- ratio 100 -> top
-    { name = "poor",  bid = 50, buyout = 100 },   -- ratio 2
-    { name = "nobuy", bid = 1,  buyout = 0   },   -- ratio 0   -> bottom
-})
-fn.SortItems()
-local ps = fn.ActiveList()
-eq(ps[1].name, "steal", "perfect: lowest bid + high buyout on top")
-eq(ps[2].name, "mid",   "perfect: next best ratio")
-eq(ps[3].name, "poor",  "perfect: higher bid sinks")
-eq(ps[4].name, "nobuy", "perfect: no buyout sinks to bottom")
-
 -- ===== Price protection OFF: >5g bids place immediately, no popup; >5g red targetable =====
 set("priceProtect", false)
 -- scan path: 7g bid places with no confirmation
@@ -302,11 +286,6 @@ eq(next(get("scanPriceDB")), nil, "priceDB: page scan (no storeIdx) records noth
 set("priceDB", pdb)
 eq(fn.AucUnit({ itemID = 500 }), 500, "AucUnit: per-unit market price from DB")
 eq(fn.AucUnit({ itemID = 999 }), nil, "AucUnit: unknown item -> nil")
-local sig = fn.Significance({ itemID = 500, cnt = 3, bid = 100, buyout = 99999 })
-ok(math.abs(sig - 15) < 1e-6, "Significance: market unit(500)*cnt(3)/bid(100) = 15, not lot buyout")
-local sig2 = fn.Significance({ itemID = 999, cnt = 1, bid = 10, buyout = 200 })
-ok(math.abs(sig2 - 20) < 1e-6, "Significance: unknown item falls back to lot buyout/bid")
-eq(fn.Significance({ itemID = 500, cnt = 1, bid = 0, buyout = 100 }), 0, "Significance: zero bid -> 0")
 
 -- price tooltip: Auctionator-style double line (gold label left, price right);
 -- per-item by default, whole stack while SHIFT is held
@@ -369,6 +348,68 @@ eq(ams[1].name, "unit500x20", "aucmin sort: 20-stack of a cheaper unit outranks 
 eq(ams[2].name, "unit1000x1", "aucmin sort: single pricier unit second")
 eq(ams[3].name, "nodata",     "aucmin sort: unpriced item sinks to the bottom")
 set("priceDB", {}); set("priceCount", {})
+
+-- ===== Dis. loot + buy: buyout < reagent EV -> profitable; buy = bid mechanism at buyout =====
+-- fake Disenchant-module bridge: 800 -> EV 50s, 801 -> EV 1s, 802 -> known not DE-able,
+-- 999 -> item info not cached yet (known=false, must NOT memoize a verdict)
+CheapBidsPublic.DisenchantValue = function(id)
+    if id == 999 then return nil, false end
+    local EV = { [800] = 5000, [801] = 100 }
+    return EV[id], true
+end
+eq(fn.DisProfit({ itemID = 800, cnt = 1, buyout = 2000 }), 3000, "disprofit: EV 50s - buyout 20s = 30s")
+eq(fn.DisProfit({ itemID = 800, cnt = 2, buyout = 2000 }), 8000, "disprofit: EV scales with the stack")
+eq(fn.DisProfit({ itemID = 801, cnt = 1, buyout = 2000 }), -1900, "disprofit: negative when EV below buyout")
+eq(fn.DisProfit({ itemID = 802, cnt = 1, buyout = 100 }), nil, "disprofit: not disenchantable -> nil")
+eq(fn.DisProfit({ itemID = 800, cnt = 1, buyout = 0 }), nil, "disprofit: no buyout -> nil")
+local uncached = { itemID = 999, cnt = 1, buyout = 100 }
+eq(fn.DisProfit(uncached), nil, "disprofit: uncached item -> nil for now")
+eq(uncached._dev, nil, "disprofit: uncached verdict NOT memoized (retry later)")
+
+set("viewMode", "scan")
+set("filter", { bidMin = 1, bidMax = 99, buyMin = nil, buyMax = nil, quality = nil,
+                times = { [1] = true, [2] = true, [3] = true, [4] = true } })
+local win  = { name = "win",  itemID = 800, cnt = 1, bid = 10, buyout = 2000, timeLeft = 4 }
+local win2 = { name = "win2", itemID = 800, cnt = 1, bid = 10, buyout = 4900, timeLeft = 4 }
+set("scanCache", {
+    win,
+    { name = "lose", itemID = 801, cnt = 1, bid = 10, buyout = 2000, timeLeft = 4 },
+    { name = "none", itemID = 802, cnt = 1, bid = 10, buyout = 100,  timeLeft = 4 },
+    win2,
+    { name = "nobuy", itemID = 800, cnt = 1, bid = 10, buyout = 0,   timeLeft = 4 },
+})
+fn.ApplyDisLoot(true)                              -- auto = no convergence timers
+local dl = fn.ActiveList()
+eq(#dl, 2, "disloot: only profitable lots listed")
+eq(dl[1].name, "win",  "disloot: biggest profit on top")
+eq(dl[2].name, "win2", "disloot: smaller profit below")
+
+-- buy the top lot: same path as bid, amount = buyout, NO popup (reagents cover it).
+-- the live lot's own bid is over the filter's 99c cap - buys must ignore the bid filter
+MOCK.auctions.list = { { name = "win", itemID = 800, cnt = 1, buyout = 2000, minBid = 50000, minInc = 1, bidAmt = 0, high = false } }
+win.idx = 1
+set("selectedItem", win)
+MOCK.bids = {}; MOCK.popups = {}; MOCK.gt = MOCK.gt + 5
+fn.BuyItem(win)
+eq(#MOCK.popups, 0, "buy: profitable lot buys with no popup")
+eq(#MOCK.bids, 1, "buy: placed immediately")
+eq(MOCK.bids[1] and MOCK.bids[1].amount, 2000, "buy: amount = the lot's buyout")
+eq(MOCK.bids[1] and MOCK.bids[1].listType, "list", "buy: placed on the live list")
+
+-- an expensive lot with NO reagent cover asks for confirmation (protection ON)
+set("priceProtect", true); set("priceDB", {}); set("priceCount", {})
+MOCK.auctions.list = { { name = "big", itemID = 802, cnt = 1, buyout = 1500000, minBid = 10, minInc = 1, bidAmt = 0, high = false } }
+local bigBuy = { name = "big", itemID = 802, cnt = 1, bid = 11, buyout = 1500000, idx = 1, timeLeft = 4 }
+set("cheapItems", { bigBuy }); set("selectedItem", bigBuy)
+MOCK.bids = {}; MOCK.popups = {}; MOCK.gt = MOCK.gt + 5
+fn.BuyItem(bigBuy)
+eq(#MOCK.bids, 0, "buy: guarded lot NOT bought immediately (no money spent)")
+eq(#MOCK.popups, 1, "buy: confirmation popup shown")
+local bp = MOCK.popups[1]
+if bp and bp.data and bp.data.commit then bp.data.commit() end
+eq(#MOCK.bids, 1, "buy: bought after confirm")
+eq(MOCK.bids[1] and MOCK.bids[1].amount, 1500000, "buy: confirmed amount = buyout")
+CheapBidsPublic.DisenchantValue = nil
 
 -- ===== options panel: tunables validate + persist to CheapBidsDB, read back live =====
 CheapBidsDB = {}
