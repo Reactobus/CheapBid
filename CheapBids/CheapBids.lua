@@ -2220,8 +2220,12 @@ end
 -- directly UNDER Auctionator's, as requested. Additive hooks only - no taint (ERR-0003 class
 -- untouched). Reads priceDB, which persists across reloads.
 local function AucStackCount(tip, link)
-    if tip.cbStack and tip.cbStack > 1 then return tip.cbStack end   -- real count from the bag slot
-    local n = select(8, GetItemInfo(link))                          -- else the item's max stack size
+    -- a CONTEXT count stashed by the Set*-hook (bag slot count, recipe reagent count,
+    -- auction lot size) is authoritative - even when it is 1: a recipe needing 1 must
+    -- price x1, not the item's max stack. Only context-free tooltips (chat links,
+    -- comparisons) fall back to the item's max stack size.
+    if tip.cbStack and tip.cbStack >= 1 then return tip.cbStack end
+    local n = select(8, GetItemInfo(link))
     return (n and n > 1) and n or 1
 end
 -- Money text in Auctionator's exact visual format, so our row blends with its Vendor/
@@ -2274,16 +2278,36 @@ local function PriceTip(tip)
     tip:Show()                                                      -- re-fit for the new line
 end
 -- capture the hovered stack size for the SHIFT = whole-stack price (bag slots only)
-local function StashStack(tip, bag, slot)
-    local n
-    if C_Container and C_Container.GetContainerItemInfo then
-        local info = C_Container.GetContainerItemInfo(bag, slot)
-        n = info and info.stackCount
-    elseif GetContainerItemInfo then
-        n = select(2, GetContainerItemInfo(bag, slot))
-    end
-    tip.cbStack = n
-end
+-- Per-method CONTEXT count extractors: what "x N" should mean for THIS tooltip.
+-- SetBagItem -> how many are in the hovered bag slot; SetTradeSkillItem/SetCraftItem
+-- with a reagent index -> how many the RECIPE needs (Auctionator's "Vendor x4" number,
+-- the bug: we showed the max stack instead); SetAuctionItem -> the lot's size.
+-- Methods not listed stash nothing -> AucStackCount falls back to the max stack.
+local STACK_FROM = {
+    SetBagItem = function(bag, slot)
+        if C_Container and C_Container.GetContainerItemInfo then
+            local info = C_Container.GetContainerItemInfo(bag, slot)
+            return info and info.stackCount
+        elseif GetContainerItemInfo then
+            return (select(2, GetContainerItemInfo(bag, slot)))
+        end
+    end,
+    SetTradeSkillItem = function(skill, index)
+        if index and GetTradeSkillReagentInfo then
+            return (select(3, GetTradeSkillReagentInfo(skill, index)))   -- reagentCountRequired
+        end
+    end,
+    SetCraftItem = function(craft, index)
+        if index and GetCraftReagentInfo then
+            return (select(3, GetCraftReagentInfo(craft, index)))        -- reagentCountRequired
+        end
+    end,
+    SetAuctionItem = function(listType, index)
+        if GetAuctionItemInfo then
+            return (select(3, GetAuctionItemInfo(listType, index)))      -- lot stack size
+        end
+    end,
+}
 -- every item-bearing Set* method we care about (skipped silently where a method
 -- does not exist on this client/tooltip)
 local PRICE_TIP_METHODS = {
@@ -2297,8 +2321,9 @@ local function HookPriceTip(tip)
     tip:HookScript("OnTooltipCleared", function(t) t.cbPriceShown = nil; t.cbStack = nil end)
     for _, m in ipairs(PRICE_TIP_METHODS) do
         if type(tip[m]) == "function" then
-            if m == "SetBagItem" then
-                hooksecurefunc(tip, m, function(t, bag, slot) StashStack(t, bag, slot); PriceTip(t) end)
+            local stackFn = STACK_FROM[m]
+            if stackFn then
+                hooksecurefunc(tip, m, function(t, a1, a2) t.cbStack = stackFn(a1, a2); PriceTip(t) end)
             else
                 hooksecurefunc(tip, m, PriceTip)
             end
@@ -2401,7 +2426,7 @@ if CheapBidsTest then
         ActiveList = ActiveList, SortItems = SortItems, UpdateButtons = UpdateButtons, ReadFilter = ReadFilter,
         ItemLink = ItemLink,
         ReadIndexInto = ReadIndexInto, AucUnit = AucUnit, PriceTip = PriceTip,
-        AucCoinText = AucCoinText,
+        AucCoinText = AucCoinText, STACK_FROM = STACK_FROM,
         DisValue = DisValue, DisProfit = DisProfit, ApplyDisLoot = ApplyDisLoot, BuyItem = BuyItem,
         IsBig = IsBig, NeedsConfirm = NeedsConfirm, ProtectThreshold = ProtectThreshold,
         OptPct = OptPct, SetPct = SetPct, OptFallback = OptFallback, SetFallback = SetFallback,

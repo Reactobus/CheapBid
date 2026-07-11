@@ -314,6 +314,23 @@ fn.PriceTip(tpS)
 ok(tpS.lines[1].l:find("Auc min", 1, true) == 1 and tpS.lines[1].l:find("x4", 1, true),
    "priceTip: SHIFT label carries the stack size")
 ok(tpS.lines[1].l:find("|cff8080ff x4|r", 1, true), "priceTip: multiplier wrapped in Auctionator's light blue")
+-- a context count of 1 (recipe needs 1) is authoritative: x1, NOT the item's max stack
+local tp1 = priceTip(500, 1)
+fn.PriceTip(tp1)
+ok(tp1.lines[1].l:find("x1", 1, true), "priceTip: context count 1 wins over the max stack")
+ok(tp1.lines[1].r:find("5", 1, true) and not tp1.lines[1].r:find("100", 1, true),
+   "priceTip: x1 amount is the unit price")
+
+-- context-count extractors: what "x N" means per tooltip source (the crafting bug:
+-- a recipe reagent must use the RECIPE count, like Auctionator's "x4")
+_G.GetTradeSkillReagentInfo = function(skill, i) return "Bolt of Mageweave", "t", 4, 18 end
+eq(fn.STACK_FROM.SetTradeSkillItem(1, 2), 4, "stack: tradeskill reagent -> recipe count")
+eq(fn.STACK_FROM.SetTradeSkillItem(1, nil), nil, "stack: crafted item itself -> no forced count")
+_G.GetCraftReagentInfo = function(c, i) return "Strange Dust", "t", 2, 9 end
+eq(fn.STACK_FROM.SetCraftItem(1, 3), 2, "stack: craft reagent -> recipe count")
+MOCK.auctions.list = { { name = "x", itemID = 500, cnt = 7, buyout = 1, minBid = 1, minInc = 1, bidAmt = 0 } }
+eq(fn.STACK_FROM.SetAuctionItem("list", 1), 7, "stack: auction row -> lot size")
+_G.GetTradeSkillReagentInfo = nil; _G.GetCraftReagentInfo = nil
 ok(tpS.lines[1].r:find("20"), "priceTip: SHIFT prices the whole stack (500c x 4 = 20s)")
 MOCK.shift = false
 CheapBidsDB = CheapBidsDB or {}; CheapBidsDB.aucTip = false
