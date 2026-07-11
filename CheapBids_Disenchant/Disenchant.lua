@@ -265,13 +265,72 @@ end
 local function HookTip(tip)
     if tip and tip.HookScript then
         tip:HookScript("OnTooltipSetItem", OnSetItem)
-        tip:HookScript("OnTooltipCleared", function(t) t.cheapBidsDEShown = nil end)
+        tip:HookScript("OnTooltipCleared", function(t) t.cheapBidsDEShown = nil; t.cheapBidsDEValueShown = nil end)
     end
 end
 HookTip(GameTooltip)
 HookTip(ItemRefTooltip)
 HookTip(ShoppingTooltip1)
 HookTip(ShoppingTooltip2)
+
+-- ---- "Disenchant price" money row (under CheapBids' "Auc min") --------------
+-- Expected value of one disenchant at current market prices: for every possible
+-- reagent, chance x average quantity x its Auc-min per-unit price from CheapBids'
+-- last GetAll (via CheapBidsPublic). Reagents the scan never priced contribute 0;
+-- if NO reagent has a price the row is not shown at all (no data - no guess).
+local function DEValue(rows)
+    local pub = CheapBidsPublic
+    if not (pub and pub.UnitPrice) then return nil end
+    local total, priced = 0, false
+    for _, row in ipairs(rows) do
+        local reagent = R[row[1]]
+        local unit = reagent and pub.UnitPrice(reagent[1])
+        if unit then
+            total = total + row[2] * row[3] * unit
+            priced = true
+        end
+    end
+    if priced and total > 0 then return math.floor(total + 0.5) end
+end
+
+local function PriceRow(tip)
+    if not Enabled() then return end
+    if not tip or tip.cheapBidsDEValueShown or not tip.GetItem then return end
+    local _, link = tip:GetItem()
+    if not link then return end
+    local itemID = tonumber(string.match(link, "item:(%d+)"))
+    if not itemID or NON_DE[itemID] then return end
+    local _, _, quality, ilvl, _, _, _, _, equipLoc = GetItemInfo(link)
+    if not quality or quality < UNCOMMON or quality > EPIC then return end
+    local rows = Lookup(quality, SLOT_CLASS[equipLoc], ilvl)
+    if not rows then return end
+    local value = DEValue(rows)
+    if not value then return end
+    tip.cheapBidsDEValueShown = true
+    local coin = (CheapBidsPublic and CheapBidsPublic.CoinText) and CheapBidsPublic.CoinText(value) or tostring(value)
+    tip:AddDoubleLine("Disenchant price", coin, 1, 0.82, 0, 1, 1, 1)   -- gold label, white price
+    tip:Show()
+end
+
+-- POST-hooks on the tooltip Set* methods, like CheapBids' own Auc-min row. This addon
+-- loads after its dependency, so these run after CheapBids' hooks and the row lands
+-- directly UNDER "Auc min" (which itself sits under Auctionator's rows). Additive only.
+local SET_METHODS = {
+    "SetBagItem", "SetInventoryItem", "SetHyperlink", "SetAuctionItem", "SetAuctionSellItem",
+    "SetLootItem", "SetLootRollItem", "SetMerchantItem", "SetBuybackItem", "SetQuestItem",
+    "SetQuestLogItem", "SetTradeSkillItem", "SetCraftItem", "SetSendMailItem", "SetInboxItem",
+    "SetTradePlayerItem", "SetTradeTargetItem", "SetGuildBankItem", "SetCompareItem",
+}
+local function HookPriceRow(tip)
+    if not tip or not tip.HookScript then return end
+    for _, m in ipairs(SET_METHODS) do
+        if type(tip[m]) == "function" then hooksecurefunc(tip, m, PriceRow) end
+    end
+end
+HookPriceRow(GameTooltip)
+HookPriceRow(ItemRefTooltip)
+HookPriceRow(ShoppingTooltip1)
+HookPriceRow(ShoppingTooltip2)
 
 -- ---- /cbde : toggle (persisted, applies immediately) -----------------------
 SLASH_CHEAPBIDSDE1 = "/cbde"
@@ -289,5 +348,6 @@ if CheapBidsTest then
         RoundupLevel = RoundupLevel, R = R, NON_DE = NON_DE, REVERSE_DE = REVERSE_DE,
         SLOT_CLASS = SLOT_CLASS, DE_TABLE = DE_TABLE,
         WEAPON = WEAPON, ARMOR = ARMOR,
+        DEValue = DEValue, PriceRow = PriceRow,
     }
 end

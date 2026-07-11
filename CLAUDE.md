@@ -41,7 +41,10 @@
 
 **Плагин-модули (каждый — отдельный аддон, `## Dependencies: CheapBids`, деплой своей папкой;
 новая папка → нужен полный рестарт игры, не `/reload`):**
-- **Disenchant** (`/cbde`) — тултип распыла + строка «Disenchanted from».
+- **Disenchant** (`/cbde`) — тултип распыла + строка «Disenchanted from» + money-строка
+  «Disenchant price» под «Auc min»: матожидание распыла (Σ шанс × ср.кол-во × Auc min рега)
+  по ценам последнего GetAll. Цены/формат берёт из `CheapBidsPublic` (крошечный публичный
+  API главного аддона: `UnitPrice`, `CoinText`).
 - **Prospect** (`/cbpr`) — тултип «руда→самоцветы» + строка «Prospected from».
 
 Тумблеры и параметры — в **панели настроек игры** (Interface → AddOns → CheapBids): проценты

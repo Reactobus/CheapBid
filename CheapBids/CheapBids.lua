@@ -2144,6 +2144,19 @@ end
 HookPriceTip(GameTooltip); HookPriceTip(ItemRefTooltip)
 HookPriceTip(ShoppingTooltip1); HookPriceTip(ShoppingTooltip2)
 
+-- Tiny public surface for our plug-in modules (e.g. the Disenchant-price tooltip row):
+-- the LIVE per-unit market price (reads the same local priceDB the rest of this file
+-- uses - the saved CheapBidsDB.priceDB copy would go stale within a session) and the
+-- exact Auctionator-style coin formatter, so module rows render identically to ours.
+-- A fresh global of our own, not a Blizzard table - no taint (ERR-0003 class untouched).
+CheapBidsPublic = {
+    UnitPrice = function(itemID)
+        local p = itemID and priceDB[itemID]
+        if p and p > 0 then return p end
+    end,
+    CoinText = AucCoinText,
+}
+
 -- ===== In-game options panel (Interface -> AddOns -> CheapBids) =====
 -- Manually-tunable knobs, persisted in CheapBidsDB and read live by the code above.
 -- Price-protection numbers take effect immediately; tooltip/browse toggles apply on the

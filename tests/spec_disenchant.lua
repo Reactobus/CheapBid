@@ -104,6 +104,47 @@ eq(DE.REVERSE_DE[22450][2], 164, "reverse: Void Crystal upper bound 164")
 tip = fakeTip(5000); DE.OnSetItem(tip)                    -- a gear item still shows the forward block
 ok(tip.lines[1] == "Disenchants into:", "reverse: gear still shows the forward DE block")
 
+-- ===== Disenchant price: EV of the reagents at Auc-min market prices =====
+local function fakeTipD(id)
+    local t = { dlines = {} }
+    function t:GetItem() return "x", link(id) end
+    function t:AddDoubleLine(l, r) self.dlines[#self.dlines + 1] = { l = l, r = r } end
+    function t:Show() end
+    return t
+end
+-- synthetic rows, hand-checkable: 0.5*2*100 + 0.5*1*200 = 200
+CheapBidsTest.set("priceDB", { [10940] = 100, [10938] = 200 })   -- Strange Dust 1s, L.Magic 2s
+eq(DE.DEValue({ { "STRANGE", 0.5, 2.0 }, { "LMAGIC", 0.5, 1.0 } }), 200, "EV: sum of chance x avg x unit")
+CheapBidsTest.set("priceDB", { [10940] = 100 })                  -- only the dust is priced
+eq(DE.DEValue({ { "STRANGE", 0.5, 2.0 }, { "LMAGIC", 0.5, 1.0 } }), 100, "EV: unpriced reagent contributes 0")
+CheapBidsTest.set("priceDB", {})
+eq(DE.DEValue({ { "STRANGE", 0.5, 2.0 } }), nil, "EV: nothing priced -> nil (no row)")
+
+-- full row path on the green chest (bracket 20): expected = sum over the REAL table rows
+local PRICES = { [10940] = 100, [10938] = 200, [10978] = 1000 }  -- dust / essence / shard
+CheapBidsTest.set("priceDB", PRICES)
+local expEV = 0
+for _, row in ipairs(DE.Lookup(2, DE.ARMOR, 20)) do
+    local rg = DE.R[row[1]]
+    local p = PRICES[rg[1]]
+    if p then expEV = expEV + row[2] * row[3] * p end
+end
+expEV = math.floor(expEV + 0.5)
+eq(DE.DEValue(DE.Lookup(2, DE.ARMOR, 20)), expEV, "EV: matches the real bracket-20 table")
+local tipP = fakeTipD(5000)
+DE.PriceRow(tipP)
+eq(#tipP.dlines, 1, "price row: one double line on DE-able gear")
+eq(tipP.dlines[1].l, "Disenchant price", "price row: capitalized label")
+DE.PriceRow(tipP)
+eq(#tipP.dlines, 1, "price row: guard prevents a duplicate")
+local tipC = fakeTipD(5004)                       -- common shirt: not disenchantable
+DE.PriceRow(tipC)
+eq(#tipC.dlines, 0, "price row: common item shows nothing")
+CheapBidsTest.set("priceDB", {})
+local tipN = fakeTipD(5000)
+DE.PriceRow(tipN)
+eq(#tipN.dlines, 0, "price row: no scan data -> no row")
+
 -- ===== /cbde toggle =====
 SlashCmdList["CHEAPBIDSDE"]()
 eq(CheapBidsDB.disenchantTip, false, "/cbde: ON -> OFF")
