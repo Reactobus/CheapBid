@@ -371,18 +371,28 @@ set("filter", { bidMin = 1, bidMax = 99, buyMin = nil, buyMax = nil, quality = n
                 times = { [1] = true, [2] = true, [3] = true, [4] = true } })
 local win  = { name = "win",  itemID = 800, cnt = 1, bid = 10, buyout = 2000, timeLeft = 4 }
 local win2 = { name = "win2", itemID = 800, cnt = 1, bid = 10, buyout = 4900, timeLeft = 4 }
+local win3 = { name = "win3", itemID = 800, cnt = 2, bid = 10, buyout = 9000, timeLeft = 4 }  -- EV 2x5000, profit 10s
 set("scanCache", {
     win,
     { name = "lose", itemID = 801, cnt = 1, bid = 10, buyout = 2000, timeLeft = 4 },
     { name = "none", itemID = 802, cnt = 1, bid = 10, buyout = 100,  timeLeft = 4 },
     win2,
+    win3,
     { name = "nobuy", itemID = 800, cnt = 1, bid = 10, buyout = 0,   timeLeft = 4 },
 })
 fn.ApplyDisLoot(true)                              -- auto = no convergence timers
 local dl = fn.ActiveList()
-eq(#dl, 2, "disloot: only profitable lots listed")
+eq(#dl, 3, "disloot: only profitable lots listed")
 eq(dl[1].name, "win",  "disloot: biggest profit on top")
-eq(dl[2].name, "win2", "disloot: smaller profit below")
+eq(dl[2].name, "win3", "disloot: middle profit second")
+eq(dl[3].name, "win2", "disloot: smallest profit last")
+
+-- in the dis-loot view the "Bid" column IS the Disenchant price: its sort ranks by EV x stack
+set("sortKey", "bid"); set("sortAsc", false)
+fn.SortItems()
+dl = fn.ActiveList()
+eq(dl[1].name, "win3", "disloot bid-column sort: 2-stack EV (1g) on top")
+ok(dl[2].name == "win" and dl[3].name == "win2", "disloot bid-column sort: equal EVs tie-break by name")
 
 -- buy the top lot: same path as bid, amount = buyout, NO popup (reagents cover it).
 -- the live lot's own bid is over the filter's 99c cap - buys must ignore the bid filter

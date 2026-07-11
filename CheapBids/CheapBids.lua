@@ -302,6 +302,10 @@ local function SortItems()
             vb = ub and ub * (b.cnt or 1) or -1
         elseif sortKey == "time" then va, vb = (a.timeLeft or 99), (b.timeLeft or 99)
         elseif sortKey == "disprofit" then va, vb = (DisProfit(a) or -math.huge), (DisProfit(b) or -math.huge)
+        elseif disLootView then                          -- "bid" header = the Disenchant price column here
+            local da, db = DisValue(a), DisValue(b)
+            va = da and da * (a.cnt or 1) or -1
+            vb = db and db * (b.cnt or 1) or -1
         else va, vb = a.bid, b.bid end
         if va == vb then return (a.name or "") < (b.name or "") end
         if sortAsc then return va < vb else return va > vb end
@@ -413,7 +417,12 @@ local function UpdateTable()
             else
                 row.nameFS:SetText(ItemName(it))
                 row.nameFS:SetTextColor(1, 1, 1)
-                row.bidFS:SetText(FormatMoney(it.bid))
+                if disLootView then                     -- Bid column doubles as "Disenchant price" here
+                    local dv = DisValue(it)
+                    row.bidFS:SetText(dv and FormatMoney(dv * (it.cnt or 1)) or "-")
+                else
+                    row.bidFS:SetText(FormatMoney(it.bid))
+                end
                 row.timeFS:SetText(TimeLeftText(it.timeLeft))
             end
             if it == selectedItem then row.sel:Show() else row.sel:Hide() end
@@ -430,7 +439,8 @@ end
 local function ApplyFilter()
     ReadFilter()
     viewMode = "scan"                -- any filter/search returns to the scan results view
-    disLootView = false              -- a normal search leaves the Dis. loot view
+    disLootView = false              -- a normal search leaves the dis. loot view
+    if headerBtns.bid and headerBtns.bid.label then headerBtns.bid.label:SetText("Bid") end
     if ResetColumnHiWater then ResetColumnHiWater() end   -- new result set -> re-fit columns once
     cheapItems = {}
     for _, it in ipairs(scanCache) do
@@ -470,6 +480,8 @@ local function ApplyDisLoot(auto)
     end
     viewMode = "scan"
     disLootView = true
+    -- the Bid column is pointless here (we pay buyouts) - it shows the reagent EV instead
+    if headerBtns.bid and headerBtns.bid.label then headerBtns.bid.label:SetText("Disenchant price") end
     if ResetColumnHiWater then ResetColumnHiWater() end
     cheapItems = {}
     for _, it in ipairs(scanCache) do
@@ -1309,7 +1321,7 @@ local function BuyItem(it)
         target = NextBuyable(IndexOf(target or selectedItem) or 1)
     end
     if not target then
-        if actFS then actFS:SetText("No fresh lot to buy - rescan or press \"Dis. loot\" again.") end
+        if actFS then actFS:SetText("No fresh lot to buy - rescan or press \"dis. loot\" again.") end
         return
     end
     selectedItem = target
@@ -1445,7 +1457,7 @@ MeasureColumns = function()
         -- static floors: header captions + fixed label sets (these never jump)
         if not colHiWater then
             colHiWater = {
-                bid  = w("Bid") + pad,
+                bid  = w(disLootView and "Disenchant price" or "Bid") + pad,   -- column is retitled in the dis-loot view
                 auc  = math.max(w("Auc min") + pad, 44),
                 buy  = math.max(w("Buyout") + pad, 44),
                 cnt  = math.max(w("Qty") + pad, 26),
@@ -1520,6 +1532,7 @@ local function BuildTable()
         f:SetAllPoints(); f:SetJustifyH(just or "LEFT"); f:SetText(text)
         b:SetScript("OnClick", function() SetSortColumn(key) end)
         b:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight", "ADD")
+        b.label = f                                     -- dis-loot view retitles the Bid column
         headerBtns[key] = b
         return b
     end
@@ -1677,7 +1690,7 @@ local function BuildUI()
     BTN.buy:SetSize(BTN_W, BTN_H); BTN.buy:SetPoint("TOPLEFT", BTN.bid, "BOTTOMLEFT", 0, -6); BTN.buy:SetText("buy"); BTN.buy:SetEnabled(false)
     BTN.buy:SetScript("OnClick", function() BuyItem(selectedItem) end)
     BTN.disLoot = CreateFrame("Button", nil, leftCol, "UIPanelButtonTemplate")
-    BTN.disLoot:SetSize(BTN_W, BTN_H); BTN.disLoot:SetPoint("LEFT", BTN.buy, "RIGHT", 4, 0); BTN.disLoot:SetText("Dis. loot"); BTN.disLoot:SetEnabled(false)
+    BTN.disLoot:SetSize(BTN_W, BTN_H); BTN.disLoot:SetPoint("LEFT", BTN.buy, "RIGHT", 4, 0); BTN.disLoot:SetText("dis. loot"); BTN.disLoot:SetEnabled(false)
     BTN.disLoot:SetScript("OnClick", function() ApplyDisLoot(false) end)
 
     -- toggle: scan results  <->  my bids (live "bidder" list; re-bid outbid lots).
