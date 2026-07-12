@@ -2272,19 +2272,13 @@ local function PriceTip(tip)
         end
         return "Auc min" .. xs, p * n
     end
-    -- CONTEXT tooltips (an AH lot of 2, a bag stack of 18, a recipe's 4) price that count
-    -- by DEFAULT - the same number the table's Auc min column shows - with the blue
-    -- multiplier, exactly like Auctionator's "Vendor x4"; SHIFT flips to the per-unit
-    -- price. Context-FREE tooltips (chat links, comparisons) stay per-unit by default,
-    -- SHIFT = the full max-stack price.
-    local label, amount
-    local ctx = tip.cbStack
-    if ctx and ctx > 1 then
-        if IsShiftKeyDown() then label, amount = "Auc min", p
-        else label, amount = withMult(ctx) end
-    else
-        if IsShiftKeyDown() then label, amount = withMult(AucStackCount(tip, link))
-        else label, amount = "Auc min", p end
+    -- DEFAULT (no Shift) = price for ONE item. SHIFT = price for the whole stack/context
+    -- (an AH lot's size, a bag stack, a recipe's required count, else the item's max stack),
+    -- shown as "Auc min xN" with the blue multiplier like Auctionator. n<=1 -> no multiplier.
+    local label, amount = "Auc min", p
+    if IsShiftKeyDown() then
+        local n = AucStackCount(tip, link)
+        if n and n > 1 then label, amount = withMult(n) end
     end
     tip:AddDoubleLine(label, AucCoinText(amount), 1, 0.82, 0, 1, 1, 1)   -- gold label, white price
     tip:Show()                                                      -- re-fit for the new line
