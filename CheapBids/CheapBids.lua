@@ -2262,17 +2262,29 @@ local function PriceTip(tip)
     local p = priceDB[id]
     if not p or p <= 0 then return end                              -- item never seen with a buyout
     tip.cbPriceShown = true
-    local label, amount = "Auc min", p
-    if IsShiftKeyDown() then
-        local n = AucStackCount(tip, link)
-        -- the " x20" multiplier is light blue, exactly like Auctionator's (LIGHTBLUE_FONT_COLOR)
+    -- " xN" multiplier in light blue, exactly like Auctionator's (LIGHTBLUE_FONT_COLOR)
+    local function withMult(n)
         local xs = " x" .. n
         if LIGHTBLUE_FONT_COLOR and LIGHTBLUE_FONT_COLOR.WrapTextInColorCode then
             xs = LIGHTBLUE_FONT_COLOR:WrapTextInColorCode(xs)
         else
             xs = "|cff8080ff" .. xs .. "|r"
         end
-        label, amount = "Auc min" .. xs, p * n
+        return "Auc min" .. xs, p * n
+    end
+    -- CONTEXT tooltips (an AH lot of 2, a bag stack of 18, a recipe's 4) price that count
+    -- by DEFAULT - the same number the table's Auc min column shows - with the blue
+    -- multiplier, exactly like Auctionator's "Vendor x4"; SHIFT flips to the per-unit
+    -- price. Context-FREE tooltips (chat links, comparisons) stay per-unit by default,
+    -- SHIFT = the full max-stack price.
+    local label, amount
+    local ctx = tip.cbStack
+    if ctx and ctx > 1 then
+        if IsShiftKeyDown() then label, amount = "Auc min", p
+        else label, amount = withMult(ctx) end
+    else
+        if IsShiftKeyDown() then label, amount = withMult(AucStackCount(tip, link))
+        else label, amount = "Auc min", p end
     end
     tip:AddDoubleLine(label, AucCoinText(amount), 1, 0.82, 0, 1, 1, 1)   -- gold label, white price
     tip:Show()                                                      -- re-fit for the new line

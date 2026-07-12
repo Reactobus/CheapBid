@@ -308,13 +308,20 @@ eq(#tp.lines, 1, "priceTip: guard prevents a duplicate line")
 local tpU = priceTip(999)
 fn.PriceTip(tpU)
 eq(#tpU.lines, 0, "priceTip: unknown item shows nothing")
-MOCK.shift = true
+-- CONTEXT count > 1 (AH lot / bag stack / recipe x4): the DEFAULT prices that count,
+-- matching the table's Auc min column; SHIFT flips to per-unit
+MOCK.shift = false
 local tpS = priceTip(500, 4)
 fn.PriceTip(tpS)
-ok(tpS.lines[1].l:find("Auc min", 1, true) == 1 and tpS.lines[1].l:find("x4", 1, true),
-   "priceTip: SHIFT label carries the stack size")
-ok(tpS.lines[1].l:find("|cff8080ff x4|r", 1, true), "priceTip: multiplier wrapped in Auctionator's light blue")
--- a context count of 1 (recipe needs 1) is authoritative: x1, NOT the item's max stack
+ok(tpS.lines[1].l:find("|cff8080ff x4|r", 1, true), "priceTip: context count shown by DEFAULT (blue x4)")
+ok(tpS.lines[1].r:find("20", 1, true), "priceTip: default amount = unit x context (20s)")
+MOCK.shift = true
+local tpU2 = priceTip(500, 4)
+fn.PriceTip(tpU2)
+eq(tpU2.lines[1].l, "Auc min", "priceTip: SHIFT flips a context tooltip to per-unit")
+ok(tpU2.lines[1].r:find("5", 1, true) and not tpU2.lines[1].r:find("20", 1, true),
+   "priceTip: SHIFT amount is the unit price")
+-- context count of 1 (recipe needs 1) is authoritative on SHIFT: x1 = unit, not max stack
 local tp1 = priceTip(500, 1)
 fn.PriceTip(tp1)
 ok(tp1.lines[1].l:find("x1", 1, true), "priceTip: context count 1 wins over the max stack")
