@@ -64,7 +64,7 @@
 
 - **`CheapBids.lua`** — весь аддон (self-contained, без внешних либ; своя таблица).
 - **`CheapBids.toc`** — `## Interface: 20505`, `SavedVariables: CheapBidsDB`.
-- **`Bindings.xml`** — хоткей `CHEAPBIDS_BIDTOP` → `CheapBids_KeyBid()` (= ставка по выбранному/верхнему валидному лоту).
+- **`Bindings.xml`** — хоткей `CHEAPBIDS_BIDTOP` → `CheapBids_KeyBid()` (= `DoSingleBid()` → `BidItem(selectedItem)`, ставка по выбранному лоту).
 
 Слэш: `/cb`, `/cheapbids` — открыть/переключить вкладку. `/cb debug` — логировать
 каждый `PlaceAuctionBid` (для диагностики ставок).
@@ -79,7 +79,7 @@
 - **GetAll (быстрый, нужен для ставок):**
   `QueryAuctionItems("", nil,nil, 0, nil,nil, true, false, nil)` — 7-й аргумент `getAll=true`.
   Разрешён только когда **2-е** возвращаемое значение `CanSendAuctionQuery()` (`canQueryAll`) = true.
-  **Серверный кулдаун ~15 мин (900с)** между GetAll. Это единственный реальный
+  **Серверный кулдаун ~15:40 (`GETALL_COOLDOWN = 940` с, по наблюдению)** между GetAll. Это единственный реальный
   числовой лимит сервера.
 - **Постраничный (медленный, для ставок НЕ годится):** `getAll=false`, по странице
   (`NUM_AUCTION_ITEMS_PER_PAGE`=50). У постранично прочитанных лотов **нет валидного
@@ -142,14 +142,15 @@
 - **Прямая ставка из свежего GetAll-снимка** по `it.idx`:
   `PlaceAuctionBid("list", it.idx, eff)` внутри клика. Это путь, при котором ставки
   реально вставали (сервер даже резал по анти-спаму от количества).
-- **Перебор до первого валидного лота** (`TryBid`/`NextBiddable`): если у выбранного
-  лота `idx` протух — бить следующий валидный из `cheapItems`. Так клик почти всегда
-  попадает, пока окно снимка открыто.
+- **Ставка только по выбранному лоту** (`BidItem`): перед ставкой лот ищется в живом
+  `"list"` по содержимому (`RelocateInLive`); если его нет — лот убирается из таблицы с
+  сообщением, ставка на другой лот **не** делается (требование игрока). Уже опробованные
+  лоты пропускаются (`NextUnattempted`), поэтому повторные клики идут вниз по списку.
 - **Подтверждение по состоянию игры** (`highBidder`) + по чату (`ERR_AUCTION_BID_PLACED`),
   и удаление лота из таблицы только после реального подтверждения.
 - **Своя таблица** (`FauxScrollFrame`, кастомные строки) — без внешних либ, чтобы
   отключать Auctioneer/Auctionator.
-- **Батч-обработка GetAll** (`GETALL_BATCH ≈ 5000` за кадр через `C_Timer.After(0)`) —
+- **Батч-обработка GetAll** (`GETALL_BATCH = 10000` за кадр через `C_Timer.After(0)`) —
   быстрый разбор 200k+ лотов без фриза.
 - **Иконки** через `GetItemInfoInstant(itemID)` (работают даже для незакэшированных).
 - `CreateFrame(..., "BackdropTemplate")` для рамок (в 2.5.5 у обычного фрейма нет
@@ -159,8 +160,7 @@
 
 - **Точечный пере-запрос лота перед ставкой** (`FocusQuery` + exact-match
   `QueryAuctionItems`): затирает живой GetAll-снимок, ломает прямой путь, даёт UX
-  «press bid again» и нестабильные ставки. **Убрано из вызовов** (функции
-  `FocusQuery`/`MatchInLive` остались мёртвым кодом — можно удалить).
+  «press bid again» и нестабильные ставки. **Убрано из кода.**
 - **Префетч на клик по строке** — убивал свежий снимок, ломал прямую ставку.
 - **Авто-цикл ставок через `C_Timer`** — отбрасывается (hardware event).
 - **Точное равенство `eff == it.bid`** как условие ставки — падает, если цену успели
@@ -194,8 +194,9 @@
 - `ReadIndexInto` — читает лот из `"list"` в кэш (с `idx` при GetAll).
 - `ProcessGetAll` / `StartScan` / `StartPageScan` / `PageScanUpdate` — скан.
 - `ApplyFilter` / `PassesFilter` / `TimeShown` / `SortItems` / `UpdateTable` — выдача.
-- `TryBid(it)` — прямая ставка по одному лоту (валидация + `PlaceOn`).
-- `BidItem(it)` — бьёт выбранный, иначе первый валидный (`TryBid` по `cheapItems`).
+- `BidItem(it)` — ставка по выбранному лоту: троттлинг и flood-режим, `RelocateInLive`,
+  затем `PlaceOn`; недоступный лот удаляется без ставки. `NextUnattempted` — следующий
+  ещё не опробованный лот; `DoSingleBid` — обёртка для кнопки и хоткея.
 - `PlaceOn` — `PlaceAuctionBid` + `pending`/`attempted` + сторож `ArmBidWatch`.
 - `ReconcileBids` / `ConfirmOldest` / `RejectOldest` — подтверждение/откат, удаление
   лота из таблицы после подтверждения.
