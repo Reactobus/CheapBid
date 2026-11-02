@@ -9,13 +9,21 @@
    `CHANGELOG.md`. После этого файл уходит на модерацию.
 4. Записать Project ID из блока About Project на странице проекта.
 
+Особенности редактора CurseForge:
+
+- Логотип должен быть не шире 850 px. Кнопка Upload image на вкладке General единственный способ его
+  заменить: скрытое поле `input[type=file]` на странице вставляет картинку в описание.
+- После Discard changes редактор описания переходит в WYSIWYG, и Markdown сохраняется как простой текст.
+  Перед Save нужно проверить, что выбран режим Markdown и предпросмотр показывает форматирование.
+- URL нельзя писать в круглых скобках: закрывающая скобка попадает в ссылку.
+
 ## Автоматические релизы
 
-1. В `CheapBids/CheapBids.toc` добавить строку `## X-Curse-Project-ID: <Project ID>`.
+1. В `CheapBids/CheapBids.toc` добавить строку `## X-Curse-Project-ID: 1780581`.
 2. Создать токен на [странице API tokens](https://authors.curseforge.com/#/settings/api-tokens) и
    сохранить его в GitHub: Settings -> Secrets and variables -> Actions -> `CF_API_TOKEN`.
 3. Для релиза дописать `CHANGELOG.md`, закоммитить и запушить тег:
-   `git tag v2.1.1 && git push origin main v2.1.1`.
+   `git tag v2.1.2 && git push origin main v2.1.2`.
 
 После патча игры обновить `## Interface:` во всех четырёх `.toc`, иначе аддон станет устаревшим.
 
@@ -37,7 +45,7 @@ pwsh scripts/package.ps1 -Version v2.1.0
 **Summary:**
 
 ```text
-Scan the whole auction house, find the cheapest bids and place them by hand from a fast sortable table.
+Scans the whole auction house and lists lots with a bid of 1-99 copper, so you can snipe them by hand.
 ```
 
 **Class:** Addons. **Main category:** Auction & Economy. **License:** GNU General Public License
@@ -48,45 +56,52 @@ version 2 (GPLv2).
 ```markdown
 # CheapBids
 
-CheapBids finds cheap auctions that everyone else missed. It scans the whole auction house at once and lists every lot in your bid range, which is 1-99 copper by default, in a fast sortable table.
+Now and then someone lists an item with a 1 copper starting bid and nobody notices. CheapBids is built to find those lots. It scans the whole auction house in one go and shows everything in your bid range (1-99 copper by default) in a table you can sort.
 
-Every bid and buyout is your own click. CheapBids is not a bot and never buys anything on its own.
+You place every bid and buyout yourself, one click at a time. It's not a bot and it won't buy anything on its own.
 
-## Features
+![The CheapBids tab in the auction house](https://media.forgecdn.net/attachments/2140/174/curseforge-screenshot-png.png)
 
-- **Full scan:** reads the whole auction house in seconds, without freezing the game. The server allows one full scan about every 15 minutes.
-- **Filters:** set bid and buyout ranges in gold, silver and copper, and pick the time-left groups to show.
-- **Table:** sort by item, rarity, quantity, seller, bid, buyout, market price or time left.
-- **Bid and buy:** click a row and press `bid` or `buy`, double-click to bid, or bind a hotkey.
-- **Price protection:** asks you to confirm a bid or buyout that looks too expensive for the item.
-- **My bids:** shows your bids with outbid lots on top in red, ready to re-bid.
-- **Auc min:** shows the lowest buyout from your last full scan in the table and on item tooltips. Hold Shift to price the whole stack.
+## What it does
+
+- Scans the whole auction house in one pass without freezing the game. The server only allows a full scan about every 15 minutes.
+- Filters by bid and buyout range (gold, silver, copper), rarity and time left.
+- Sorts by item, rarity, quantity, seller, bid, buyout, market price or time left.
+- Click a row and press `bid` or `buy`. Double-clicking a row also bids, and you can bind a hotkey.
+- Asks first if a bid or buyout looks too expensive for the item.
+- The `my bids` view lists your bids with the outbid ones on top in red, so you can re-bid.
+
+## Prices on your items
+
+Every full scan remembers the lowest buyout of each item. That price then shows up as "Auc min" in the table and on item tooltips, including your bags, recipes, loot and mail, so you can see what things are worth without opening the auction house.
+
+Prices stay saved after you log out and update with your next full scan. Hold Shift over an item to see the price for the whole stack.
 
 ## Optional modules
 
-All modules come in the same download, and you can turn each one off in the AddOns list.
+They come in the same download. If you don't want one, untick it in the AddOns list.
 
-- **Disenchant:** tooltips show what an item disenchants into, with chances and an estimated value. Also unlocks the `dis. loot` view, which lists lots worth buying out and disenchanting.
-- **Prospect:** tooltips show which gems an ore can yield, and which ores a gem comes from.
-- **CompactBrowse:** turns the default Browse tab into a dense list of thin rows.
+- **Disenchant** adds to the tooltip what an item disenchants into, with chances and an estimated value. It also unlocks the `dis. loot` view, which lists lots worth buying out and disenchanting.
+- **Prospect** shows which gems an ore can give and which ores a gem comes from.
+- **CompactBrowse** turns the default Browse tab into a dense list of thin rows.
 
-## How to use
+## How to use it
 
 1. Open the auction house and pick the **CheapBids** tab.
 2. Press `scan auc`.
 3. Set your filters and press `search`.
-4. Select a row and press `bid` or `buy`. Do this soon after scanning, because scan results go stale.
+4. Select a row and press `bid` or `buy`. Don't wait too long after the scan, because the results go stale.
 
-Type `/cb` to open the tab. Options are in Interface -> AddOns -> CheapBids.
+`/cb` opens the tab. Options are in Interface -> AddOns -> CheapBids.
 
-## Compatibility
+## Using it with other auction addons
 
-Disable Auctioneer and Auctionator while bidding. Auction addons share a single auction list, so a second addon overwrites it and your bids fail.
+CheapBids works fine next to Auctionator, so you can leave it on. Auctioneer is different: turn it off while you bid, because it overwrites the auction list and your bids fail.
 
 ## Credits
 
 CheapBids is free software under the GNU GPL v2 or later. Source code: https://github.com/Reactobus/CheapBid
 
-- The Disenchant and Prospect modules use data and logic from Enchantrix by Norganna's AddOns (http://enchantrix.org/), GPL v2 or later.
-- The CompactBrowse module is derived from Auc-Util-CompactUI, part of Auctioneer by Norganna's AddOns (http://auctioneeraddon.com/), GPL v2 or later.
+- The Disenchant and Prospect modules use data and logic from [Enchantrix](http://enchantrix.org/) by Norganna's AddOns, GPL v2 or later.
+- The CompactBrowse module is derived from Auc-Util-CompactUI, part of [Auctioneer](http://auctioneeraddon.com/) by Norganna's AddOns, GPL v2 or later.
 ```

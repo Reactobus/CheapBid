@@ -2,10 +2,9 @@
 -- Self-contained AH tab: own table (no external libs), GetAll scan, and manual
 -- bidding driven by the player's clicks.
 --
--- IMPORTANT: run this with Auctioneer / Auctionator DISABLED. Two auction
--- addons fight over the single auction list (each re-queries and overwrites it),
--- which makes bids hit a stale list and silently fail. With CheapBids as the
--- only AH addon, the GetAll snapshot stays valid and bids go through instantly.
+-- IMPORTANT: run this with Auctioneer DISABLED. It re-queries and overwrites the
+-- single auction list, which makes bids hit a stale list and silently fail.
+-- Auctionator can stay enabled: it does not get in the way of bidding.
 --
 -- Flow: "scan auc" (GetAll) -> filter -> "search" -> select a row and "bid"
 -- (one per click / hotkey). "cancel" stops.
@@ -1815,7 +1814,7 @@ local function BuildUI()
     statusFS:SetPoint("TOPLEFT", mBidMax.last, "TOPRIGHT", 16, 3)
     statusFS:SetPoint("TOPRIGHT", content, "TOPRIGHT", -8, 3)
     statusFS:SetJustifyH("LEFT"); statusFS:SetWordWrap(true)
-    statusFS:SetText("Disable Auctioneer/Auctionator! scan auc -> filter -> search -> bid.")
+    statusFS:SetText("Disable Auctioneer! scan auc -> filter -> search -> bid.")
 
     -- rarity filter: a Browse-tab-style dropdown directly UNDER the status line.
     -- Picking a rarity re-runs the filter automatically, exactly like the time
@@ -2011,7 +2010,7 @@ ev:SetScript("OnEvent", function(_, event, arg1, arg2)
         CheapBidsDB.myBids = nil           -- drop the removed "old bids" saved record
         priceDB = CheapBidsDB.priceDB or {}   -- Auc min price survives reloads until the next GetAll
         priceCount = CheapBidsDB.priceCount or {}
-        print("|cff00cc00[CheapBids]|r loaded. IMPORTANT: disable Auctioneer/Auctionator to bid.")
+        print("|cff00cc00[CheapBids]|r loaded. IMPORTANT: disable Auctioneer to bid.")
     elseif event == "AUCTION_HOUSE_SHOW" then
         CreateTab()
         floodMode = false; floodAnchor = 0; prevErrAt = 0   -- fresh AH session -> exit flood mode

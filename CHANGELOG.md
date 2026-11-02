@@ -1,3 +1,7 @@
+# v2.1.1
+
+- Auctionator can stay enabled while you bid, so the in-game reminders now only mention Auctioneer.
+
 # v2.1.0
 
 First public release, for TBC Classic Anniversary 2.5.6.

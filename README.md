@@ -16,8 +16,8 @@ Install it through CurseForge, or copy these folders into
 - `CheapBids_Prospect` (optional)
 - `CheapBids_CompactBrowse` (optional)
 
-> **Important:** disable Auctioneer and Auctionator while bidding. Auction addons
-> share a single auction list, so a second one overwrites it and bids hit stale data.
+> **Important:** disable Auctioneer while bidding. It overwrites the shared auction
+> list, so bids hit stale data. Auctionator works fine alongside CheapBids.
 
 ## Use
 
