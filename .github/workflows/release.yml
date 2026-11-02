@@ -1,0 +1,24 @@
+# A pushed tag (e.g. v2.1.0) packages the addon and uploads it to CurseForge and
+# GitHub Releases. Needs the CF_API_TOKEN repository secret and X-Curse-Project-ID in
+# CheapBids/CheapBids.toc.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+      GITHUB_OAUTH: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: BigWigsMods/packager@v2

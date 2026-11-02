@@ -38,6 +38,7 @@
 | Модуль-плагин Disenchant | `CheapBid\CheapBids_Disenchant\` (`Disenchant.lua`, `CheapBids_Disenchant.toc`) |
 | Модуль-плагин Prospect | `CheapBid\CheapBids_Prospect\` (`Prospect.lua`, `CheapBids_Prospect.toc`) |
 | Remote | `https://github.com/Reactobus/CheapBid.git` |
+| Релиз на CurseForge | [`docs/CURSEFORGE.md`](docs/CURSEFORGE.md), `.pkgmeta`, `.github/workflows/release.yml` |
 
 **Плагин-модули (каждый — отдельный аддон, `## Dependencies: CheapBids`, деплой своей папкой;
 новая папка → нужен полный рестарт игры, не `/reload`):**
@@ -265,3 +266,5 @@ LibStub/Babylonian/Stubby, чисто статическая таблица. Х�
 - Аддон **только показывает** список и ставит **по клику игрока**. Никакого
   авто-выкупа/авто-цикла. Это намеренно — чтобы не быть ботом.
 - Не трогаем чужие аддоны и игровые файлы кроме папки `CheapBids`.
+- **Лицензия — GPL v2 или новее, это обязательно:** Disenchant, Prospect и CompactBrowse производны от
+  Enchantrix и Auctioneer (GPL). Код Auctionator копировать нельзя (All Rights Reserved).

@@ -16,6 +16,9 @@
 -- "## Dependencies: CheapBids"), like CheapBids_Disenchant. Additive HookScript on
 -- the standard tooltips only (no taint). Toggle with /cbpr (persisted in
 -- CheapBidsDB.prospectTip, applies immediately). ASCII/English text only.
+--
+-- License: GNU GPL v2 or later, see LICENSE. Modified in 2026 by Reactobus from
+-- Enchantrix by Norganna's AddOns (http://enchantrix.org/), GPL v2 or later.
 -- ===========================================================================
 
 -- ---- gems: itemID -> { English name, quality (for name colour) } -----------

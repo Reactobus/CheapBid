@@ -22,6 +22,9 @@
 -- no taint: we never replace secure functions). Toggle with /cbde (persisted in
 -- CheapBidsDB.disenchantTip, applies immediately, no /reload needed).
 -- Displayed text is ASCII/English only, per project rules.
+--
+-- License: GNU GPL v2 or later, see LICENSE. Modified in 2026 by Reactobus from
+-- Enchantrix by Norganna's AddOns (http://enchantrix.org/), GPL v2 or later.
 -- ===========================================================================
 
 -- ---- reagents: itemID, English name, reagent quality (for name colour) -----

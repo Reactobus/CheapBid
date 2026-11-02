@@ -1,0 +1,19 @@
+# BigWigsMods packager: builds one zip holding all four addon folders.
+package-as: CheapBids
+
+license-output: LICENSE
+manual-changelog: CHANGELOG.md
+
+move-folders:
+  CheapBids/CheapBids: CheapBids
+  CheapBids/CheapBids_CompactBrowse: CheapBids_CompactBrowse
+  CheapBids/CheapBids_Disenchant: CheapBids_Disenchant
+  CheapBids/CheapBids_Prospect: CheapBids_Prospect
+
+ignore:
+  - CLAUDE.md
+  - README.md
+  - CHANGELOG.md
+  - docs
+  - scripts
+  - tests

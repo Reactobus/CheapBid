@@ -10,6 +10,8 @@
 -- Flow: "scan auc" (GetAll) -> filter -> "search" -> select a row and "bid"
 -- (one per click / hotkey). "cancel" stops.
 -- Not a bot: every bid needs a player button click.
+--
+-- License: GNU GPL v2 or later, see LICENSE.
 
 local ADDON_NAME = "CheapBids"
 local SCAN_BTN   = "scan auc"

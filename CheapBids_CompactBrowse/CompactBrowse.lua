@@ -30,6 +30,10 @@
 -- scan/bid engine, so it can be switched off with /cbrowse (persisted in
 -- CheapBidsDB.compactBrowse) or unticked in the AddOns list without any effect on
 -- CheapBids itself. Displayed text is ASCII only (rarity comes from the item link).
+--
+-- License: GNU GPL v2 or later, see LICENSE. Modified in 2026 by Reactobus from
+-- Auc-Util-CompactUI, part of Auctioneer by Norganna's AddOns
+-- (http://auctioneeraddon.com/), GPL v2 or later.
 -- ===========================================================================
 
 local M = {}
