@@ -11,8 +11,9 @@ New-Item -ItemType Directory -Force $stage, (Split-Path $zip) | Out-Null
 foreach ($name in 'CheapBids', 'CheapBids_CompactBrowse', 'CheapBids_Disenchant', 'CheapBids_Prospect') {
     Copy-Item (Join-Path $root $name) (Join-Path $stage $name) -Recurse
     Copy-Item (Join-Path $root 'LICENSE') (Join-Path $stage $name)
-    $toc = Join-Path $stage "$name/$name.toc"
-    (Get-Content $toc -Raw).Replace('@project-version@', $Version) | Set-Content $toc -NoNewline
+    foreach ($toc in Get-ChildItem (Join-Path $stage $name) -Filter '*.toc') {   # e.g. X.toc and X_Camelot.toc
+        (Get-Content $toc.FullName -Raw).Replace('@project-version@', $Version) | Set-Content $toc.FullName -NoNewline
+    }
 }
 
 if (Test-Path $zip) { Remove-Item $zip }

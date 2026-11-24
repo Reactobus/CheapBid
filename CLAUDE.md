@@ -1,8 +1,30 @@
 # CheapBids — гид по проекту (для Claude Code)
 
-Аддон для **WoW TBC Classic 2.5.5** (юбилейный клиент `_anniversary_`). Сканирует
-весь аукцион (GetAll), показывает лоты со **ставкой 1–99 медью**, и даёт ставить
-по ним **вручную** (игрок жмёт кнопку/строку — это НЕ бот).
+Аддон для **WoW TBC Classic 2.5.6** (юбилейный клиент `_anniversary_`) и, в ветке `forever`,
+для **WoW Forever** (`_forever_`, интерфейс 16001). Сканирует весь аукцион (GetAll), показывает
+лоты со **ставкой 1–99 медью**, и даёт ставить по ним **вручную** (игрок жмёт кнопку/строку — это НЕ бот).
+
+## WoW Forever (ветка `forever`)
+
+- **Клиент:** `wowf 1.60.1`, `WOW_PROJECT_CAMELOT`, интерфейс **16001**. Это клиент семейства
+  Mainline (код Midnight 12.x) с **новым аукционом `C_AuctionHouse`** и ограничениями Midnight
+  (secret values). Старых `QueryAuctionItems`/`GetAuctionItemInfo`/`PlaceAuctionBid` там нет.
+- **Как сосуществуют клиенты:** TBC читает `CheapBids.toc` (20506), Forever — `CheapBids_Camelot.toc`
+  (16001), который сначала грузит `Modern.lua`. Всё обращение к аукциону в `CheapBids.lua` идёт через
+  таблицу-адаптер `AH`: на TBC она вызывает старые функции, на Forever её подменяет `CheapBidsModern`
+  из `Modern.lua` (те же имена + `Relocate`, `CreateTab`, `HideOthers`, `Prefetch`, `IsBidError`).
+  Правишь вызов аукциона в `CheapBids.lua` — только через `AH.*`, иначе Forever упадёт при загрузке.
+- **Ставка на Forever:** полный скан (`ReplicateItems`, 15 мин на аккаунт) не даёт `auctionID`.
+  `Modern.lua` в фоне ищет каждый дешёвый лот поиском по предмету (`SendSearchQuery`, ≤ ~85/мин при
+  лимите 100) и сопоставляет по количеству + выкупу. Ставка = `C_AuctionHouse.PlaceBid(auctionID, сумма)`
+  из клика. Лот без `auctionID`: клик ставит его в начало очереди и пишет «press again», лот НЕ удаляется.
+- **Модули:** CompactBrowse только для TBC (нет `_Camelot.toc`, ранний `return` без legacy-API).
+  Disenchant/Prospect имеют `_Camelot.toc`.
+- **Не проверено в игре (на 2026-11-25):** доступен ли `ReplicateItems` на Forever (TSM и Auctionator его
+  там не используют), принимает ли `PlaceBid` медь (`SupportsCopperValues`; иначе ставка округляется
+  вверх до серебра), вид вкладки на `AuctionHouseFrame`, есть ли `UIDropDownMenu`/`FauxScrollFrame`.
+- **Лицензии:** код Auctionator не изучать и не копировать — в его `AGENTS.md` автор запрещает ИИ-агентам
+  использовать репозиторий как образец. TSM — All Rights Reserved.
 
 > Видимый текст в самом аддоне — **английский** (по требованию игрока).
 > Ответы в чат игроку — **русский**.

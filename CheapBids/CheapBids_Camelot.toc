@@ -1,0 +1,12 @@
+## Interface: 16001
+## Title: CheapBids
+## Notes: Auction tab listing lots with bid 1-99 copper. Manual bidding only.
+## Author: Reactobus
+## Version: @project-version@
+## X-License: GPL-2.0-or-later
+## X-Website: https://github.com/Reactobus/CheapBid
+## SavedVariables: CheapBidsDB
+
+Modern.lua
+CheapBids.lua
+Bindings.xml

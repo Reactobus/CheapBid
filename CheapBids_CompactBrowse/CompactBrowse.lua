@@ -36,6 +36,13 @@
 -- (http://auctioneeraddon.com/), GPL v2 or later.
 -- ===========================================================================
 
+-- Legacy-AH only. The modern client (WoW Forever, C_AuctionHouse) has no Browse tab
+-- of this kind and no QueryAuctionItems; there is no _Camelot.toc for this module, but
+-- if a player forces "load out of date addons" we bail out before touching anything.
+-- QueryAuctionItems is a client C function on TBC, defined before any addon loads, so
+-- this guard never fires there.
+if not QueryAuctionItems then return end
+
 local M = {}
 M.buttons     = {}
 M.pageContents = {}

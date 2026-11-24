@@ -1,0 +1,12 @@
+## Interface: 16001
+## Title: CheapBids |cff33ff99Disenchant|r
+## Notes: Item tooltips show what the item disenchants into and with what chance. A plug-in module of CheapBids.
+## Author: Reactobus
+## Version: @project-version@
+## X-License: GPL-2.0-or-later
+## X-Website: https://github.com/Reactobus/CheapBid
+## Dependencies: CheapBids
+## X-Category: Auction House
+## X-Toggle: /cbde
+
+Disenchant.lua

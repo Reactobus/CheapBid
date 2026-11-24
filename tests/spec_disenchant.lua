@@ -161,6 +161,109 @@ eq(dv, nil, "bridge: NON_DE exception -> no value")
 eq(known, true, "bridge: NON_DE -> final verdict")
 CheapBidsTest.set("priceDB", {})
 
+-- ===== modern client (WoW Forever): item-info aliases fall back to C_Item =====
+do
+    local gii, giiI, savedCItem = GetItemInfo, GetItemInfoInstant, C_Item
+    GetItemInfo, GetItemInfoInstant = nil, nil
+    C_Item = {
+        GetItemInfo = function(x) return gii(x) end,
+        GetItemInfoInstant = function(id) return id, nil, nil, nil, "ctex" end,
+    }
+    CheapBidsTest.set("priceDB", PRICES)
+    local v, k = CheapBidsPublic.DisenchantValue(5000)
+    eq(v, expEV, "C_Item: bridge EV via C_Item.GetItemInfo")
+    eq(k, true, "C_Item: bridge final verdict via C_Item")
+    ok(DE.BuildLines(DE.Lookup(2, DE.ARMOR, 20))[1]:find("|Tctex:14|t", 1, true), "C_Item: icon via C_Item.GetItemInfoInstant")
+    C_Item = nil
+    eq(DE.ItemInfo(5000), nil, "no item API at all -> nil, no error")
+    GetItemInfo, GetItemInfoInstant, C_Item = gii, giiI, savedCItem
+    CheapBidsTest.set("priceDB", {})
+end
+
+-- ===== modern client: tooltip hook registration choice =====
+-- fake tooltip frame: HookScript THROWS for an unsupported script, like the real client
+local function fakeFrame(id, scripts)
+    local f = { id = id, lines = {}, dlines = {}, handlers = {} }
+    function f:HasScript(s) return scripts[s] == true end
+    function f:HookScript(s, fn)
+        if not scripts[s] then error(s .. ": no such script") end
+        self.handlers[s] = fn
+    end
+    function f:GetItem() return "x", link(self.id) end
+    function f:AddLine(text) self.lines[#self.lines + 1] = text end
+    function f:AddDoubleLine(l) self.dlines[#self.dlines + 1] = l end
+    function f:Show() end
+    function f:SetBagItem() end
+    return f
+end
+local function fakeTDP()
+    local t = { calls = {} }
+    function t.AddTooltipPostCall(kind, fn) t.calls[#t.calls + 1] = { kind = kind, fn = fn } end
+    return t
+end
+do
+    local savedEnum = Enum
+    Enum = { TooltipDataType = { Item = 0 } }
+    CheapBidsDB.disenchantTip = true
+    CheapBidsTest.set("priceDB", PRICES)
+
+    -- TBC tooltip: legacy script hooked, TooltipDataProcessor ignored even if present
+    local legacy = fakeFrame(5000, { OnTooltipSetItem = true, OnTooltipCleared = true })
+    eq(DE.HookTip(legacy), true, "legacy: HookTip hooks OnTooltipSetItem")
+    ok(legacy.handlers.OnTooltipSetItem == DE.OnSetItem, "legacy: OnSetItem is the handler")
+    ok(legacy.handlers.OnTooltipCleared ~= nil, "legacy: OnTooltipCleared hooked")
+    local tdp = fakeTDP()
+    eq(DE.InstallModernHooks(tdp, legacy), nil, "legacy: no post-call registered")
+    eq(#tdp.calls, 0, "legacy: TooltipDataProcessor untouched")
+
+    -- modern tooltip: no OnTooltipSetItem -> HookTip must not call HookScript (would throw)
+    local modern = fakeFrame(5000, { OnTooltipCleared = true })
+    local okHook, res = pcall(DE.HookTip, modern)
+    ok(okHook and res == false, "modern: HookTip skips (no throw)")
+    tdp = fakeTDP()
+    local set = DE.InstallModernHooks(tdp, nil, modern, legacy)   -- nil tooltip tolerated
+    ok(set and set[modern] and not set[legacy], "modern: only the modern tooltip accepted")
+    eq(#tdp.calls, 1, "modern: one post-call registered")
+    eq(tdp.calls[1].kind, 0, "modern: registered for Enum.TooltipDataType.Item")
+    local post = tdp.calls[1].fn
+    post(modern)
+    eq(#modern.lines, 4, "modern: forward block via post-call")
+    eq(#modern.dlines, 1, "modern: price row via post-call")
+    post(modern)
+    eq(#modern.lines, 4, "modern: no duplicate block on re-fire")
+    eq(#modern.dlines, 1, "modern: no duplicate price row on re-fire")
+    modern.handlers.OnTooltipCleared(modern)
+    ok(not modern.cheapBidsDEShown and not modern.cheapBidsDEValueShown, "modern: OnTooltipCleared resets flags")
+    post(modern)
+    eq(#modern.lines, 8, "modern: block shows again after a clear")
+
+    local other = fakeFrame(5000, { OnTooltipCleared = true })
+    post(other)
+    eq(#other.lines, 0, "modern: foreign tooltip ignored")
+
+    local secret = fakeFrame(5000, { OnTooltipCleared = true })
+    function secret:GetItem() error("attempt to use a secret value") end
+    local tdp2 = fakeTDP()
+    DE.InstallModernHooks(tdp2, secret)
+    ok(pcall(tdp2.calls[1].fn, secret), "modern: post-call swallows a secret-value error")
+
+    eq(DE.InstallModernHooks(fakeTDP(), fakeFrame(5000, {})), nil, "modern: no OnTooltipCleared -> not accepted")
+    Enum = nil
+    eq(DE.InstallModernHooks(fakeTDP(), fakeFrame(5000, { OnTooltipCleared = true })), nil, "no Enum -> nothing registered")
+    Enum = savedEnum
+
+    -- Set* price post-hooks: bare PriceRow on TBC, pcall-wrapped on modern
+    local savedHSF, hooked = hooksecurefunc, {}
+    hooksecurefunc = function(t, m, fn) hooked[#hooked + 1] = { t = t, m = m, fn = fn } end
+    DE.HookPriceRow(legacy)
+    DE.HookPriceRow(secret)
+    hooksecurefunc = savedHSF
+    eq(#hooked, 2, "price hooks: one Set* method per tooltip")
+    ok(hooked[1].m == "SetBagItem" and hooked[1].fn == DE.PriceRow, "price hooks: TBC gets the bare PriceRow")
+    ok(hooked[2].fn ~= DE.PriceRow and pcall(hooked[2].fn, secret), "price hooks: modern wrapper swallows errors")
+    CheapBidsTest.set("priceDB", {})
+end
+
 -- ===== /cbde toggle =====
 SlashCmdList["CHEAPBIDSDE"]()
 eq(CheapBidsDB.disenchantTip, false, "/cbde: ON -> OFF")

@@ -17,9 +17,24 @@
 -- the standard tooltips only (no taint). Toggle with /cbpr (persisted in
 -- CheapBidsDB.prospectTip, applies immediately). ASCII/English text only.
 --
+-- Runs on TBC 2.5.x (CheapBids_Prospect.toc) and on the modern WoW Forever client
+-- (CheapBids_Prospect_Camelot.toc): where the OnTooltipSetItem script is gone the
+-- same handler is registered through TooltipDataProcessor instead (see the hooks).
+--
 -- License: GNU GPL v2 or later, see LICENSE. Modified in 2026 by Reactobus from
 -- Enchantrix by Norganna's AddOns (http://enchantrix.org/), GPL v2 or later.
 -- ===========================================================================
+
+-- ---- item-info aliases (TBC globals first, C_Item on modern clients) --------
+-- Resolved at CALL time, so on TBC this is exactly the global call.
+local function ItemInfo(item)
+    local f = GetItemInfo or (C_Item and C_Item.GetItemInfo)
+    if f then return f(item) end
+end
+local function ItemInfoInstant(item)
+    local f = GetItemInfoInstant or (C_Item and C_Item.GetItemInfoInstant)
+    if f then return f(item) end
+end
 
 -- ---- gems: itemID -> { English name, quality (for name colour) } -----------
 -- Names are hardcoded so lines render for uncached items; the live GetItemInfo
@@ -115,10 +130,10 @@ local QUALITY_HEX = { [1] = "|cffffffff", [2] = "|cff1eff00", [3] = "|cff0070dd"
 local function GemText(gemID)
     local g = GEM[gemID]
     local fallbackName, q = (g and g[1]) or ("item:" .. gemID), (g and g[2]) or 1
-    local name = GetItemInfo(gemID) or fallbackName
+    local name = ItemInfo(gemID) or fallbackName
     local qc = ITEM_QUALITY_COLORS and ITEM_QUALITY_COLORS[q]
     local hex = (qc and qc.hex) or QUALITY_HEX[q] or "|cffffffff"
-    local icon = select(5, GetItemInfoInstant(gemID))
+    local icon = select(5, ItemInfoInstant(gemID))
     local iconTag = icon and ("|T" .. icon .. ":14|t ") or ""
     return iconTag .. hex .. name .. "|r"
 end
@@ -166,16 +181,55 @@ local function OnSetItem(tip)
     end
 end
 
+local function ClearPRFlag(t) t.cheapBidsPRShown = nil end
+
+-- true only when this tooltip really supports the script handler (HookScript on a
+-- missing script THROWS; OnTooltipSetItem is gone on 10.0.2+ clients).
+local function HasTipScript(tip, script)
+    if not (tip and tip.HasScript) then return false end
+    local ok, has = pcall(tip.HasScript, tip, script)
+    return (ok and has) and true or false
+end
+
+-- TBC path (unchanged): OnTooltipSetItem + OnTooltipCleared. Returns true if hooked.
 local function HookTip(tip)
-    if tip and tip.HookScript then
+    if tip and tip.HookScript and HasTipScript(tip, "OnTooltipSetItem") then
         tip:HookScript("OnTooltipSetItem", OnSetItem)
-        tip:HookScript("OnTooltipCleared", function(t) t.cheapBidsPRShown = nil end)
+        tip:HookScript("OnTooltipCleared", ClearPRFlag)
+        return true
     end
+    return false
 end
 HookTip(GameTooltip)
 HookTip(ItemRefTooltip)
 HookTip(ShoppingTooltip1)
 HookTip(ShoppingTooltip2)
+
+-- modern client (WoW Forever): TooltipDataProcessor post-call instead, only for tooltips
+-- WITHOUT OnTooltipSetItem (never double-hooks TBC) and only if OnTooltipCleared could be
+-- hooked to reset the de-dup flag. Body pcall'd for restricted "secret" values.
+-- Returns the accepted-tooltip set (or nil when nothing was registered) for tests.
+local function InstallModernHooks(tdp, ...)
+    local itemType = Enum and Enum.TooltipDataType and Enum.TooltipDataType.Item
+    if not (tdp and tdp.AddTooltipPostCall and itemType ~= nil) then return nil end
+    local tips, any = {}, false
+    for i = 1, select("#", ...) do
+        local tip = select(i, ...)
+        if tip and tip.HookScript and not HasTipScript(tip, "OnTooltipSetItem")
+           and HasTipScript(tip, "OnTooltipCleared")
+           and pcall(tip.HookScript, tip, "OnTooltipCleared", ClearPRFlag) then
+            tips[tip] = true
+            any = true
+        end
+    end
+    if not any then return nil end
+    local function Post(tip)
+        if tip and tips[tip] then OnSetItem(tip) end
+    end
+    tdp.AddTooltipPostCall(itemType, function(tip) pcall(Post, tip) end)
+    return tips
+end
+InstallModernHooks(TooltipDataProcessor, GameTooltip, ItemRefTooltip, ShoppingTooltip1, ShoppingTooltip2)
 
 -- ---- /cbpr : toggle (persisted, applies immediately) -----------------------
 SLASH_CHEAPBIDSPR1 = "/cbpr"
@@ -191,5 +245,7 @@ if CheapBidsTest then
     CheapBidsTest.PR = {
         OnSetItem = OnSetItem, BuildLines = BuildLines,
         PROSPECT = PROSPECT, FROM_ORE = FROM_ORE, GEM = GEM, ORE_NAME = ORE_NAME,
+        HookTip = HookTip, HasTipScript = HasTipScript,
+        InstallModernHooks = InstallModernHooks, ItemInfo = ItemInfo,
     }
 end

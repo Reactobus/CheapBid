@@ -54,6 +54,58 @@ tip = fakeTip(2770); PR.OnSetItem(tip)
 eq(#tip.lines, 0, "/cbpr off -> nothing")
 CheapBidsDB.prospectTip = true
 
+-- ===== modern client (WoW Forever): C_Item fallback + TooltipDataProcessor path =====
+do
+    local gii, savedCItem = GetItemInfo, C_Item
+    GetItemInfo, C_Item = nil, { GetItemInfo = function() return "LiveGem" end }
+    ok(PR.BuildLines(PR.PROSPECT[2770])[1]:find("LiveGem", 1, true), "C_Item: gem name via C_Item.GetItemInfo")
+    C_Item = nil
+    ok(PR.BuildLines(PR.PROSPECT[2770])[1]:find("Tigerseye", 1, true), "no item API -> fallback name, no error")
+    GetItemInfo, C_Item = gii, savedCItem
+end
+do
+    local function frame(id, scripts)
+        local f = fakeTip(id); f.handlers = {}
+        function f:HasScript(s) return scripts[s] == true end
+        function f:HookScript(s, fn)
+            if not scripts[s] then error(s .. ": no such script") end
+            self.handlers[s] = fn
+        end
+        return f
+    end
+    local function tdp()
+        local t = { calls = {} }
+        function t.AddTooltipPostCall(kind, fn) t.calls[#t.calls + 1] = { kind = kind, fn = fn } end
+        return t
+    end
+    local savedEnum = Enum
+    Enum = { TooltipDataType = { Item = 0 } }
+
+    local legacy = frame(2770, { OnTooltipSetItem = true, OnTooltipCleared = true })
+    eq(PR.HookTip(legacy), true, "legacy: HookTip hooks OnTooltipSetItem")
+    local t1 = tdp()
+    eq(PR.InstallModernHooks(t1, legacy), nil, "legacy: no post-call even with TDP present")
+    eq(#t1.calls, 0, "legacy: TooltipDataProcessor untouched")
+
+    local modern = frame(2770, { OnTooltipCleared = true })
+    local okHook, res = pcall(PR.HookTip, modern)
+    ok(okHook and res == false, "modern: HookTip skips (no throw)")
+    local t2 = tdp()
+    ok(PR.InstallModernHooks(t2, modern), "modern: post-call registered")
+    eq(t2.calls[1] and t2.calls[1].kind, 0, "modern: registered for Enum.TooltipDataType.Item")
+    t2.calls[1].fn(modern); t2.calls[1].fn(modern)
+    eq(#modern.lines, 4, "modern: ore block once (de-dup)")
+    modern.handlers.OnTooltipCleared(modern)
+    t2.calls[1].fn(modern)
+    eq(#modern.lines, 8, "modern: shows again after a clear")
+
+    local secret = frame(2770, { OnTooltipCleared = true })
+    function secret:GetItem() error("attempt to use a secret value") end
+    local t3 = tdp(); PR.InstallModernHooks(t3, secret)
+    ok(pcall(t3.calls[1].fn, secret), "modern: post-call swallows a secret-value error")
+    Enum = savedEnum
+end
+
 SlashCmdList["CHEAPBIDSPR"]()
 eq(CheapBidsDB.prospectTip, false, "/cbpr: ON -> OFF")
 SlashCmdList["CHEAPBIDSPR"]()

@@ -1,6 +1,7 @@
 # CheapBids
 
-An auction house addon for World of Warcraft **TBC Classic Anniversary 2.5.6**.
+An auction house addon for World of Warcraft **TBC Classic Anniversary 2.5.6** and
+**WoW Forever** (experimental, `forever` branch).
 
 It scans the whole auction house, lists the cheapest bids (1-99 copper by default),
 and lets you bid or buy out from a fast sortable table. Every bid and buyout is a
@@ -14,7 +15,11 @@ Install it through CurseForge, or copy these folders into
 - `CheapBids` (required)
 - `CheapBids_Disenchant` (optional)
 - `CheapBids_Prospect` (optional)
-- `CheapBids_CompactBrowse` (optional)
+- `CheapBids_CompactBrowse` (optional, TBC only)
+
+On WoW Forever use `World of Warcraft\_forever_\Interface\AddOns\` instead. Forever has the
+modern auction house: after a scan CheapBids looks up each cheap lot on the server in the
+background, and a lot that has not been found yet needs a second click to bid.
 
 > **Important:** disable Auctioneer while bidding. It overwrites the shared auction
 > list, so bids hit stale data. Auctionator works fine alongside CheapBids.

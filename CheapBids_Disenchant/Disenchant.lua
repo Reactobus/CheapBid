@@ -23,9 +23,26 @@
 -- CheapBidsDB.disenchantTip, applies immediately, no /reload needed).
 -- Displayed text is ASCII/English only, per project rules.
 --
+-- Runs on TBC 2.5.x (CheapBids_Disenchant.toc) and on the modern WoW Forever client
+-- (CheapBids_Disenchant_Camelot.toc): where the OnTooltipSetItem script is gone the
+-- same handlers are registered through TooltipDataProcessor instead (see the hooks).
+--
 -- License: GNU GPL v2 or later, see LICENSE. Modified in 2026 by Reactobus from
 -- Enchantrix by Norganna's AddOns (http://enchantrix.org/), GPL v2 or later.
 -- ===========================================================================
+
+-- ---- item-info aliases (TBC globals first, C_Item on modern clients) --------
+-- The modern client (WoW Forever, 12.x family) may not have the GetItemInfo /
+-- GetItemInfoInstant globals any more; C_Item has the same signatures. Resolved at
+-- CALL time (not captured at load), so on TBC this is exactly the global call.
+local function ItemInfo(item)
+    local f = GetItemInfo or (C_Item and C_Item.GetItemInfo)
+    if f then return f(item) end
+end
+local function ItemInfoInstant(item)
+    local f = GetItemInfoInstant or (C_Item and C_Item.GetItemInfoInstant)
+    if f then return f(item) end
+end
 
 -- ---- reagents: itemID, English name, reagent quality (for name colour) -----
 -- Names are hardcoded so lines render even when the reagent is not in the
@@ -197,10 +214,10 @@ local QUALITY_HEX = {  -- fallback when ITEM_QUALITY_COLORS has no .hex (tests)
 }
 local function ReagentText(key)
     local id, fallbackName, rq = R[key][1], R[key][2], R[key][3]
-    local name = GetItemInfo(id) or fallbackName
+    local name = ItemInfo(id) or fallbackName
     local qc = ITEM_QUALITY_COLORS and ITEM_QUALITY_COLORS[rq]
     local hex = (qc and qc.hex) or QUALITY_HEX[rq] or "|cffffffff"
-    local icon = select(5, GetItemInfoInstant(id))
+    local icon = select(5, ItemInfoInstant(id))
     local iconTag = icon and ("|T" .. icon .. ":14|t ") or ""
     return iconTag .. hex .. name .. "|r"
 end
@@ -253,7 +270,7 @@ local function OnSetItem(tip)
         tip:Show()
         return
     end
-    local _, _, quality, ilvl, _, _, _, _, equipLoc = GetItemInfo(link)
+    local _, _, quality, ilvl, _, _, _, _, equipLoc = ItemInfo(link)
     if not quality or quality < UNCOMMON or quality > EPIC then return end
     local rows = Lookup(quality, SLOT_CLASS[equipLoc], ilvl)
     if not rows then return end
@@ -265,11 +282,25 @@ local function OnSetItem(tip)
     tip:Show()  -- re-measure so the new lines fit
 end
 
+local function ClearDEFlags(t) t.cheapBidsDEShown = nil; t.cheapBidsDEValueShown = nil end
+
+-- true only when this tooltip really supports the script handler. HookScript on a
+-- script the frame does not have THROWS - and OnTooltipSetItem is gone on 10.0.2+
+-- clients (WoW Forever), where TooltipDataProcessor replaces it (see below).
+local function HasTipScript(tip, script)
+    if not (tip and tip.HasScript) then return false end
+    local ok, has = pcall(tip.HasScript, tip, script)
+    return (ok and has) and true or false
+end
+
+-- TBC path (unchanged): OnTooltipSetItem + OnTooltipCleared. Returns true if hooked.
 local function HookTip(tip)
-    if tip and tip.HookScript then
+    if tip and tip.HookScript and HasTipScript(tip, "OnTooltipSetItem") then
         tip:HookScript("OnTooltipSetItem", OnSetItem)
-        tip:HookScript("OnTooltipCleared", function(t) t.cheapBidsDEShown = nil; t.cheapBidsDEValueShown = nil end)
+        tip:HookScript("OnTooltipCleared", ClearDEFlags)
+        return true
     end
+    return false
 end
 HookTip(GameTooltip)
 HookTip(ItemRefTooltip)
@@ -303,7 +334,7 @@ local function PriceRow(tip)
     if not link then return end
     local itemID = tonumber(string.match(link, "item:(%d+)"))
     if not itemID or NON_DE[itemID] then return end
-    local _, _, quality, ilvl, _, _, _, _, equipLoc = GetItemInfo(link)
+    local _, _, quality, ilvl, _, _, _, _, equipLoc = ItemInfo(link)
     if not quality or quality < UNCOMMON or quality > EPIC then return end
     local rows = Lookup(quality, SLOT_CLASS[equipLoc], ilvl)
     if not rows then return end
@@ -324,16 +355,52 @@ local SET_METHODS = {
     "SetQuestLogItem", "SetTradeSkillItem", "SetCraftItem", "SetSendMailItem", "SetInboxItem",
     "SetTradePlayerItem", "SetTradeTargetItem", "SetGuildBankItem", "SetCompareItem",
 }
+-- On a modern tooltip (no OnTooltipSetItem) the post-hook is pcall'd: Midnight-era
+-- clients can hand addons restricted ("secret") values. TBC keeps the bare PriceRow.
+local function SafePriceRow(tip) pcall(PriceRow, tip) end
 local function HookPriceRow(tip)
     if not tip or not tip.HookScript then return end
+    local fn = HasTipScript(tip, "OnTooltipSetItem") and PriceRow or SafePriceRow
     for _, m in ipairs(SET_METHODS) do
-        if type(tip[m]) == "function" then hooksecurefunc(tip, m, PriceRow) end
+        if type(tip[m]) == "function" then hooksecurefunc(tip, m, fn) end
     end
 end
 HookPriceRow(GameTooltip)
 HookPriceRow(ItemRefTooltip)
 HookPriceRow(ShoppingTooltip1)
 HookPriceRow(ShoppingTooltip2)
+
+-- ---- modern client (WoW Forever): TooltipDataProcessor instead of OnTooltipSetItem --
+-- Only tooltips WITHOUT the OnTooltipSetItem script get this path, so a client that has
+-- both (TBC keeps its legacy script) is never hooked twice. A tooltip is accepted only if
+-- its OnTooltipCleared could be hooked - that resets the de-dup flags; without it a flag
+-- would stick and the block would never show again. One post-call does the forward/
+-- reverse block, then the price row (CheapBids' own Auc-min post-call was registered
+-- first, as our dependency loads first). Body pcall'd for restricted "secret" values.
+-- Returns the accepted-tooltip set (or nil when nothing was registered) for tests.
+local function InstallModernHooks(tdp, ...)
+    local itemType = Enum and Enum.TooltipDataType and Enum.TooltipDataType.Item
+    if not (tdp and tdp.AddTooltipPostCall and itemType ~= nil) then return nil end
+    local tips, any = {}, false
+    for i = 1, select("#", ...) do
+        local tip = select(i, ...)
+        if tip and tip.HookScript and not HasTipScript(tip, "OnTooltipSetItem")
+           and HasTipScript(tip, "OnTooltipCleared")
+           and pcall(tip.HookScript, tip, "OnTooltipCleared", ClearDEFlags) then
+            tips[tip] = true
+            any = true
+        end
+    end
+    if not any then return nil end
+    local function Post(tip)
+        if not (tip and tips[tip]) then return end
+        pcall(OnSetItem, tip)                 -- separate pcalls: one failing never hides the other
+        pcall(PriceRow, tip)
+    end
+    tdp.AddTooltipPostCall(itemType, function(tip) pcall(Post, tip) end)
+    return tips
+end
+InstallModernHooks(TooltipDataProcessor, GameTooltip, ItemRefTooltip, ShoppingTooltip1, ShoppingTooltip2)
 
 -- ---- bridge for the main addon's "Dis. loot" view ---------------------------
 -- EV (copper) of disenchanting ONE of this item at current market prices, or nil.
@@ -343,7 +410,7 @@ HookPriceRow(ShoppingTooltip2)
 if CheapBidsPublic then
     CheapBidsPublic.DisenchantValue = function(itemID)
         if not itemID or NON_DE[itemID] then return nil, true end
-        local _, _, quality, ilvl, _, _, _, _, equipLoc = GetItemInfo(itemID)
+        local _, _, quality, ilvl, _, _, _, _, equipLoc = ItemInfo(itemID)
         if not quality then return nil, false end            -- still loading -> retry
         if quality < UNCOMMON or quality > EPIC then return nil, true end
         local rows = Lookup(quality, SLOT_CLASS[equipLoc], ilvl)
@@ -369,5 +436,7 @@ if CheapBidsTest then
         SLOT_CLASS = SLOT_CLASS, DE_TABLE = DE_TABLE,
         WEAPON = WEAPON, ARMOR = ARMOR,
         DEValue = DEValue, PriceRow = PriceRow,
+        HookTip = HookTip, HookPriceRow = HookPriceRow, HasTipScript = HasTipScript,
+        InstallModernHooks = InstallModernHooks, ItemInfo = ItemInfo,
     }
 end

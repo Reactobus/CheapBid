@@ -21,6 +21,24 @@ local ROW_H      = 18
 local BID_OK  = ERR_AUCTION_BID_PLACED or "Bid accepted"
 local AUC_ERR = ERR_AUCTION_DATABASE_ERROR or "Internal auction error."
 
+-- Auction API adapter. On TBC (legacy AH) these call the client's own functions, looked up
+-- at call time. On WoW Forever, Modern.lua (loaded first by CheapBids_Camelot.toc) supplies
+-- the same calls built on C_AuctionHouse plus a few extras (Relocate, CreateTab...), see
+-- there. ONE table on purpose: this chunk is at Lua 5.1's 200-local limit.
+local AH = CheapBidsModern or {
+    Info      = function(...) return GetAuctionItemInfo(...) end,
+    TimeLeft  = function(...) return GetAuctionItemTimeLeft(...) end,
+    Num       = function(...) return GetNumAuctionItems(...) end,
+    Link      = function(...) return GetAuctionItemLink(...) end,
+    Bid       = function(...) return PlaceAuctionBid(...) end,
+    Query     = function(...) return QueryAuctionItems(...) end,
+    CanQuery  = function() return CanSendAuctionQuery() end,
+    QueryBids = function() return GetBidderAuctionItems() end,
+    ItemInfo  = function(...) return GetItemInfo(...) end,
+    ItemInfoInstant = function(...) return GetItemInfoInstant(...) end,
+    Host      = function() return AuctionFrame end,
+}
+
 -- key-binding labels (shown in Esc -> Key Bindings -> CheapBids)
 BINDING_HEADER_CHEAPBIDS = "CheapBids"
 BINDING_NAME_CHEAPBIDS_BIDTOP = "Bid on selected lot"
@@ -173,7 +191,7 @@ end
 local function ItemQuality(it)
     if it.q ~= nil then return it.q end
     if it.itemID and it.itemID ~= 0 then
-        local q = select(3, GetItemInfo(it.itemID))     -- nil while uncached (also kicks off the load)
+        local q = select(3, AH.ItemInfo(it.itemID))     -- nil while uncached (also kicks off the load)
         if q then it.q = q; return q end
     end
     return it.qual
@@ -198,7 +216,7 @@ end
 local function ItemName(it)
     if it.link and it.link ~= "" then return it.link end
     if it.itemID and it.itemID ~= 0 then
-        local n, l = GetItemInfo(it.itemID)
+        local n, l = AH.ItemInfo(it.itemID)
         if l then it.link = l; return l end
         if n then return n end
     end
@@ -212,7 +230,7 @@ end
 local function ItemLink(it)
     if it.link and it.link ~= "" then return it.link end
     if it.itemID and it.itemID ~= 0 then
-        local _, l = GetItemInfo(it.itemID)
+        local _, l = AH.ItemInfo(it.itemID)
         if l then it.link = l; return l end
     end
     return nil
@@ -222,7 +240,7 @@ end
 
 local function SafeQuery(fn, depth)
     depth = depth or 0
-    if CanSendAuctionQuery() then fn()
+    if AH.CanQuery() then fn()
     elseif depth < 600 then C_Timer.After(0.05, function() SafeQuery(fn, depth + 1) end)
     else if statusFS then statusFS:SetText("Server not responding (throttled). Try later.") end end
 end
@@ -420,7 +438,7 @@ local function UpdateTable()
             row.item = it
             local ic = it.tex
             if it.itemID and it.itemID ~= 0 then
-                local instTex = select(5, GetItemInfoInstant(it.itemID))   -- icon from itemID, even if uncached
+                local instTex = select(5, AH.ItemInfoInstant(it.itemID))   -- icon from itemID, even if uncached
                 if instTex then ic = instTex end
             end
             row.icon:SetTexture(ic or 134400)
@@ -467,6 +485,7 @@ local function UpdateTable()
 end
 
 local function ApplyFilter()
+    if AH.Prefetch then C_Timer.After(0, AH.Prefetch) end   -- modern AH: look up auctionIDs in the background
     ReadFilter()
     viewMode = "scan"                -- any filter/search returns to the scan results view
     disLootView = false              -- a normal search leaves the dis. loot view
@@ -572,7 +591,7 @@ end
 -- GetAuctionItemInfo: 1name 2tex 3cnt 4qual 5canUse 6lvl 7lvlCol 8minBid 9minInc 10buyout 11bidAmt 12high ... 17itemID
 local function ReadIndexInto(cache, i, storeIdx)
     local name, tex, cnt, qual, _, _, _, minBid, minInc, buyout, bidAmt, high, _, owner, ownerFull, _, itemID =
-        GetAuctionItemInfo("list", i)
+        AH.Info("list", i)
     owner = owner or ownerFull        -- some realms fill only ownerFullName (15) in a GetAll dump
     if not name or name == "" then
         if not itemID or itemID == 0 then return end
@@ -590,7 +609,7 @@ local function ReadIndexInto(cache, i, storeIdx)
     cache[#cache + 1] = {
         name = name or "", tex = tex, cnt = cnt or 1, qual = qual, owner = owner,
         bid = CalcBid(minBid, minInc, bidAmt), buyout = buyout or 0,
-        timeLeft = GetAuctionItemTimeLeft("list", i),   -- 1<30m 2:30m-2h 3:2-12h 4:>12h
+        timeLeft = AH.TimeLeft("list", i),   -- 1<30m 2:30m-2h 3:2-12h 4:>12h
         itemID = itemID, idx = storeIdx and i or nil,
         led = high or false,            -- we ALREADY lead this lot -> not biddable, hidden from the list
         -- link is resolved lazily in ItemName via itemID; calling
@@ -721,11 +740,15 @@ end
 
 local function StartScan()
     viewMode = "scan"
-    local _, canAll = CanSendAuctionQuery()
+    local _, canAll = AH.CanQuery()
     if not canAll then
         local last = (CheapBidsDB and CheapBidsDB.lastGetAll) or 0
         local left = math.ceil((GETALL_COOLDOWN - (time() - last)) / 60)
         if left < 0 or last == 0 then left = 0 end
+        if AH.modern then                  -- no slow page scan on the modern AH: just wait
+            statusFS:SetText("Full scan on cooldown ~" .. left .. " min (one per 15 min per account).")
+            return
+        end
         if not pageConfirm then
             pageConfirm = true
             statusFS:SetText((left > 0 and ("Fast GetAll on cooldown ~" .. left .. " min. ") or
@@ -745,11 +768,11 @@ local function StartScan()
     scanCache = {}; cheapItems = {}; scanPriceDB = {}; scanPriceCount = {}; UpdateTable()
     scanToken = scanToken + 1
     local myToken = scanToken
-    if not ITEM_QUALITY_COLORS[-1] then ITEM_QUALITY_COLORS[-1] = { r=0, g=0, b=0 } end
+    if not AH.modern and not ITEM_QUALITY_COLORS[-1] then ITEM_QUALITY_COLORS[-1] = { r=0, g=0, b=0 } end
     scanMode = "getall"; isScanning = true; getAllPending = true
     UpdateButtons()
     SetProgress(0.05); statusFS:SetText("GetAll: downloading the whole auction house...")
-    QueryAuctionItems("", nil, nil, 0, nil, nil, true, false, nil)
+    AH.Query("", nil, nil, 0, nil, nil, true, false, nil)
     C_Timer.After(90, function()
         if myToken == scanToken and scanMode == "getall" and getAllPending then
             FinishScan("GetAll did not respond in 90s. Try again.")
@@ -762,12 +785,12 @@ StartPageScan = function()
     scanMode = "page"; scanPage = 0; scanTotalPages = 1; isScanning = true
     UpdateButtons()
     SetProgress(0.01); statusFS:SetText("Page-by-page scan...")
-    SafeQuery(function() QueryAuctionItems("", nil, nil, scanPage, nil, nil, false, false, nil) end)
+    SafeQuery(function() AH.Query("", nil, nil, scanPage, nil, nil, false, false, nil) end)
 end
 
 local function PageScanUpdate()
     if scanMode ~= "page" then return end
-    local numOnPage, total = GetNumAuctionItems("list")
+    local numOnPage, total = AH.Num("list")
     numOnPage = numOnPage or 0; total = total or 0
     if scanPage == 0 then scanTotalPages = math.max(1, math.ceil(total / PER_PAGE)) end
     for i = 1, numOnPage do ReadIndexInto(scanCache, i) end
@@ -775,7 +798,7 @@ local function PageScanUpdate()
     statusFS:SetText(string.format("Scan page %d/%d, collected %d", scanPage + 1, scanTotalPages, #scanCache))
     if numOnPage >= PER_PAGE and (scanPage + 1) < scanTotalPages then
         scanPage = scanPage + 1
-        SafeQuery(function() QueryAuctionItems("", nil, nil, scanPage, nil, nil, false, false, nil) end)
+        SafeQuery(function() AH.Query("", nil, nil, scanPage, nil, nil, false, false, nil) end)
     else
         isScanning = false; scanMode = nil; HideProgress()
         statusFS:SetText(string.format("Scan done: %d lots.", #scanCache))
@@ -788,7 +811,7 @@ end
 --   1) PlaceAuctionBid works ONLY from a HARDWARE EVENT (a real click/keypress);
 --      bids issued from timers or event handlers are silently dropped.
 --   2) The full-scan (GetAll) snapshot goes STALE fast - after a few bids or a
---      little time, GetAuctionItemInfo("list", idx) no longer matches our cache,
+--      little time, AH.Info("list", idx) no longer matches our cache,
 --      so bidding straight off the snapshot fails ("no available lots").
 -- So we DON'T re-query (a focused query overwrites the live snapshot and broke the
 -- direct path). Instead RelocateInLive re-finds the exact lot near its stored idx by
@@ -849,7 +872,7 @@ local function ReconcileBids()
         local probe = it._bidIdx or it.idx
         if probe then
             local name, _, _, _, _, _, _, _, _, _, _, high, _, _, _, _, itemID =
-                GetAuctionItemInfo("list", probe)
+                AH.Info("list", probe)
             if name and (not it.itemID or itemID == it.itemID) and high then
                 PopPending(it)
                 bidsOK = bidsOK + 1
@@ -879,7 +902,8 @@ local function RejectOldest()
     local it = table.remove(pending, 1)
     if not it then return end
     bidsFail = bidsFail + 1
-    attempted[it] = nil                 -- retryable (NOT removed - the lot stays in the list)
+    attempted[it] = nil                 -- retryable
+    if AH.Invalidate then AH.Invalidate(it.idx) end   -- modern AH: its auctionID is stale, look it up again (NOT removed - the lot stays in the list)
     -- "Internal auction error" fires for a STALE lot (isolated, normal) AND for the
     -- server flood guard. Only a CLUSTER - a 2nd error within FLOOD_WINDOW - is a real
     -- flood -> switch to the token-bucket pace + lock. An isolated one is just "retry".
@@ -946,7 +970,7 @@ local function PlaceOn(it, idx, eff, verb)
     attempted[it] = true
     it._bidIdx = idx
     table.insert(pending, it)
-    PlaceAuctionBid("list", idx, eff)        -- accepted because we're inside a click
+    AH.Bid("list", idx, eff)        -- accepted because we're inside a click
     bidsSent = bidsSent + 1
     if actFS then actFS:SetText(string.format("%s: %s (%s). Placed %d.", verb or "Bid", ItemName(it), FormatMoney(eff), bidsOK)) end
     UpdateTable()
@@ -966,14 +990,15 @@ local RELOCATE_WINDOW = 150
 local function RelocateInLive(it, skipFilter)
     -- skipFilter=true (the BUY path): identity match only. The bid-price filter boxes
     -- must not veto a buyout - dis-loot lots can carry any bid, we pay the buyout.
+    if AH.Relocate then return AH.Relocate(it, skipFilter, PassesFilter) end
     if not it.idx then return nil end
-    local n = GetNumAuctionItems("list") or 0
+    local n = AH.Num("list") or 0
     if n == 0 then return nil end
     local ledSeen = false
     local function matchAt(i)
         if i < 1 or i > n then return nil end
         local _, _, cnt, _, _, _, _, minBid, minInc, buyout, bidAmt, high, _, _, _, _, itemID =
-            GetAuctionItemInfo("list", i)
+            AH.Info("list", i)
         -- identify by itemID, NOT name: right after a GetAll the item NAMES lag
         -- (cache loads async), so requiring `name` wrongly marked freshly-sorted
         -- lots "unavailable". itemID is present even when the name isn't cached;
@@ -1010,11 +1035,11 @@ end
 -- re-sorted/desynced (id mismatch), already led (high=true), or uncached (nil).
 local function BidDebug(tag, it)
     if not debugOn or not it then return end
-    local liveN = GetNumAuctionItems("list") or 0
+    local liveN = AH.Num("list") or 0
     local ln, li, lhigh, lbid, lbuy = "nil", "nil", "nil", "nil", "nil"
     if it.idx then
         local name, _, _, _, _, _, _, minBid, minInc, buyout, bidAmt, high, _, _, _, _, itemID =
-            GetAuctionItemInfo("list", it.idx)
+            AH.Info("list", it.idx)
         ln = tostring(name); li = tostring(itemID); lhigh = tostring(high)
         lbid = tostring(CalcBid(minBid, minInc, bidAmt)); lbuy = tostring(buyout)
     end
@@ -1025,7 +1050,7 @@ local function BidDebug(tag, it)
     -- ordering probe: bids at the head vs the middle vs the tail reveal how the
     -- LIVE "list" is sorted (if bids rise with position -> sorted by bid).
     local function at(i)
-        local _, _, _, _, _, _, _, mb, mi, _, ba, _, _, _, _, _, id = GetAuctionItemInfo("list", i)
+        local _, _, _, _, _, _, _, mb, mi, _, ba, _, _, _, _, _, id = AH.Info("list", i)
         return string.format("[%s]id=%s bid=%s", tostring(i), tostring(id), tostring(CalcBid(mb, mi, ba)))
     end
     if liveN > 2 then
@@ -1048,17 +1073,17 @@ end
 local function ReadMyBids()
     local selKey = selectedItem and selectedItem._key or nil   -- remember the highlight across the rebuild
     local fresh = {}
-    local n = (GetNumAuctionItems and GetNumAuctionItems("bidder")) or 0
+    local n = (AH.Num("bidder")) or 0
     for i = 1, n do
         local name, tex, cnt, qual, _, _, _, minBid, minInc, buyout, bidAmt, high, _, owner, ownerFull, _, itemID =
-            GetAuctionItemInfo("bidder", i)
+            AH.Info("bidder", i)
         owner = owner or ownerFull
         if name and name ~= "" then
             local it = {
                 name = name, tex = tex, cnt = cnt or 1, qual = qual, owner = owner,   -- owner: DISPLAY only
                 bid = CalcBid(minBid, minInc, bidAmt),     -- amount needed to (re)take the lead
                 buyout = buyout or 0,
-                timeLeft = GetAuctionItemTimeLeft("bidder", i),
+                timeLeft = AH.TimeLeft("bidder", i),
                 itemID = itemID, idx = i, led = high or false,
             }
             -- stable identity for selection-preservation across refresh: NO owner in the KEY
@@ -1098,7 +1123,7 @@ local function RefreshMyBids(silent, resort)
     -- only sort server-side ON ENTRY: repeated SortAuctionItems calls can TOGGLE the
     -- direction on some clients, which would flip the order every poll tick.
     if resort then pcall(SortAuctionItems, "bidder", "duration") end
-    pcall(GetBidderAuctionItems)            -- async; AUCTION_BIDDER_LIST_UPDATE re-reads when it lands
+    pcall(AH.QueryBids)            -- async; AUCTION_BIDDER_LIST_UPDATE re-reads when it lands
     ReadMyBids()
     UpdateTable()                           -- keeps the current scroll offset (we never SetValue here)
     if not silent and statusFS then statusFS:SetText(string.format(
@@ -1143,7 +1168,7 @@ local function CommitBidderBid(target)
     local now = GetTime and GetTime() or 0
     if now > 0 and (now - lastBidAt) < BID_MIN_INTERVAL then return end           -- server anti-spam gate
     lastBidAt = now
-    PlaceAuctionBid("bidder", target.idx, target.bid)                            -- inside this click -> accepted
+    AH.Bid("bidder", target.idx, target.bid)                            -- inside this click -> accepted
     bidsSent = bidsSent + 1
     if actFS then actFS:SetText(string.format("Re-bid: %s (%s). Sent %d.", ItemName(target), FormatMoney(target.bid), bidsSent)) end
     -- drop this row and ADVANCE, bid landed or not, WITHOUT resetting scroll; with
@@ -1218,8 +1243,9 @@ end
 local function CommitScanBid(target)
     if not target then return end
     local now = GetTime and GetTime() or 0
-    local idx, eff, ledSeen = RelocateInLive(target)
+    local idx, eff, ledSeen, wait = RelocateInLive(target)
     if not idx then
+        if wait then if actFS then actFS:SetText(wait) end return end
         if actFS then actFS:SetText(ItemName(target) ..
             (ledSeen and " - you already lead this, removed." or " - item taken/unavailable, removed.")) end
         RemoveItem(target); UpdateTable(); return
@@ -1266,8 +1292,9 @@ local function BidItem(it)
     end
     selectedItem = target
     BidDebug("sel", target)                             -- why is the target (not) biddable?
-    local idx, eff, ledSeen = RelocateInLive(target)
+    local idx, eff, ledSeen, wait = RelocateInLive(target)
     if not idx then
+        if wait then if actFS then actFS:SetText(wait) end UpdateTable() return end
         -- not biddable -> drop it. Distinguish "we already lead it" from "gone".
         if actFS then actFS:SetText(ItemName(target) ..
             (ledSeen and " - you already lead this, removed." or " - item taken/unavailable, removed.")) end
@@ -1316,8 +1343,9 @@ end
 local function CommitScanBuy(target)
     if not target then return end
     local now = GetTime and GetTime() or 0
-    local idx, _, ledSeen = RelocateInLive(target, true)     -- identity only: filter can't veto a buyout
+    local idx, _, ledSeen, wait = RelocateInLive(target, true)     -- identity only: filter can't veto a buyout
     if not idx then
+        if wait then if actFS then actFS:SetText(wait) end return end
         if actFS then actFS:SetText(ItemName(target) ..
             (ledSeen and " - you already lead this, removed." or " - item taken/unavailable, removed.")) end
         RemoveItem(target); UpdateTable(); return
@@ -1351,8 +1379,9 @@ local function BuyItem(it)
         return
     end
     selectedItem = target
-    local idx, _, ledSeen = RelocateInLive(target, true)
+    local idx, _, ledSeen, wait = RelocateInLive(target, true)
     if not idx then
+        if wait then if actFS then actFS:SetText(wait) end return end
         if actFS then actFS:SetText(ItemName(target) ..
             (ledSeen and " - you already lead this, removed." or " - item taken/unavailable, removed.")) end
         RemoveItem(target)
@@ -1651,7 +1680,7 @@ local function BuildTable()
             if not it then return end
             local link = it.link
             if not link and it.itemID and it.itemID ~= 0 then
-                link = select(2, GetItemInfo(it.itemID)) or ("item:" .. it.itemID)   -- bids/old rows: link from itemID
+                link = select(2, AH.ItemInfo(it.itemID)) or ("item:" .. it.itemID)   -- bids/old rows: link from itemID
             end
             if link then
                 GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
@@ -1665,12 +1694,13 @@ local function BuildTable()
 end
 
 local function BuildUI()
-    if uiBuilt or not AuctionFrame then return end
+    local host = AH.Host()
+    if uiBuilt or not host then return end
     local bt = BackdropTemplateMixin and "BackdropTemplate" or nil
 
-    content = CreateFrame("Frame", "CheapBidsContent", AuctionFrame)
-    content:SetPoint("TOPLEFT", AuctionFrame, "TOPLEFT", 8, -22)
-    content:SetPoint("BOTTOMRIGHT", AuctionFrame, "BOTTOMRIGHT", -32, 28)
+    content = CreateFrame("Frame", "CheapBidsContent", host)
+    content:SetPoint("TOPLEFT", host, "TOPLEFT", 8, -22)
+    content:SetPoint("BOTTOMRIGHT", host, "BOTTOMRIGHT", -32, 28)
     content:Hide()
 
     -- filter (two rows)
@@ -1695,7 +1725,7 @@ local function BuildUI()
     -- left panel
     leftCol = CreateFrame("Frame", nil, content, bt)
     leftCol:SetPoint("TOPLEFT", content, "TOPLEFT", 7, -76)       -- +5px off the AH frame border
-    leftCol:SetPoint("BOTTOMLEFT", AuctionFrame, "BOTTOMLEFT", 15, 12)  -- reach the frame's inner bottom (match rightPanel)
+    leftCol:SetPoint("BOTTOMLEFT", host, "BOTTOMLEFT", 15, 12)  -- reach the frame's inner bottom (match rightPanel)
     leftCol:SetWidth(170)                                          -- shrink so the right edge stays put
     if leftCol.SetBackdrop then leftCol:SetBackdrop(PANEL_BACKDROP); leftCol:SetBackdropColor(0,0,0,0.55); leftCol:SetBackdropBorderColor(0.45,0.45,0.45) end
 
@@ -1801,7 +1831,7 @@ local function BuildUI()
     -- right panel
     local rightPanel = CreateFrame("Frame", nil, content, bt)
     rightPanel:SetPoint("TOPLEFT", leftCol, "TOPRIGHT", 1, 0)         -- left edge 5px further left
-    rightPanel:SetPoint("BOTTOMRIGHT", AuctionFrame, "BOTTOMRIGHT", -8, 12)  -- stretch to the frame's bottom-right corner
+    rightPanel:SetPoint("BOTTOMRIGHT", host, "BOTTOMRIGHT", -8, 12)  -- stretch to the frame's bottom-right corner
     if rightPanel.SetBackdrop then rightPanel:SetBackdrop(PANEL_BACKDROP); rightPanel:SetBackdropColor(0.045,0.05,0.07,1); rightPanel:SetBackdropBorderColor(0.45,0.45,0.45) end
 
     listFrame = CreateFrame("Frame", "CheapBidsList", rightPanel)
@@ -1841,7 +1871,24 @@ local function BuildUI()
         return "All"
     end
 
-    local rarityDD = CreateFrame("Frame", "CheapBidsRarityDD", content, "UIDropDownMenuTemplate")
+    local rarityDD
+    if not UIDropDownMenu_Initialize then
+        -- no legacy dropdown on this client: a button that cycles All -> Poor -> ... -> Epic
+        rarityDD = CreateFrame("Button", "CheapBidsRarityDD", content, "UIPanelButtonTemplate")
+        rarityDD:SetSize(96, 20); rarityDD:SetPoint("LEFT", rarityHdr, "RIGHT", 6, 0)
+        rarityDD:SetText(RarityText(-1))
+        rarityDD:SetScript("OnClick", function(self)
+            local cur = filter.quality == nil and -1 or filter.quality
+            local nxt = -1
+            for i, o in ipairs(RARITY_OPTS) do
+                if o.value == cur then nxt = (RARITY_OPTS[i + 1] or RARITY_OPTS[1]).value end
+            end
+            if nxt == -1 then filter.quality = nil else filter.quality = nxt end
+            self:SetText(RarityText(nxt))
+            ApplyFilter()
+        end)
+    else
+    rarityDD = CreateFrame("Frame", "CheapBidsRarityDD", content, "UIDropDownMenuTemplate")
     rarityDD:SetPoint("LEFT", rarityHdr, "RIGHT", -8, -2)   -- to the RIGHT of the label (-8 trims the menu's left chrome)
     local function RarityOnClick(self)
         UIDropDownMenu_SetSelectedValue(rarityDD, self.value)
@@ -1877,6 +1924,7 @@ local function BuildUI()
     UIDropDownMenu_SetWidth(rarityDD, 90)
     UIDropDownMenu_SetSelectedValue(rarityDD, -1)
     UIDropDownMenu_SetText(rarityDD, RarityText(-1))
+    end
 
     -- scan / GetAll progress bar: lives in the top header, to the RIGHT of the Rarity
     -- dropdown (moved here from the left panel, where it overlapped the Cache counter).
@@ -1890,7 +1938,7 @@ local function BuildUI()
 
     BTN.scan:SetScript("OnClick", function()
         if isScanning then AbortScan(); return end
-        if not (AuctionFrame and AuctionFrame:IsVisible()) then return end
+        if not (AH.Host() and AH.Host():IsVisible()) then return end
         StartScan()
     end)
     BTN.search:SetScript("OnClick", function()
@@ -1916,10 +1964,10 @@ local function PollGetAllReady()
     local tk = readyToken
     local function tick()
         if tk ~= readyToken then return end                          -- superseded by a newer poll
-        if not (uiBuilt and AuctionFrame and AuctionFrame:IsVisible()
+        if not (uiBuilt and AH.Host() and AH.Host():IsVisible()
                 and content and content:IsShown()) then return end   -- tab/AH closed -> stop the chain
         if not isScanning and BTN.scan then
-            local _, canAll = CanSendAuctionQuery()
+            local _, canAll = AH.CanQuery()
             local fs = BTN.scan:GetFontString()
             if canAll then
                 BTN.scan:SetText(SCAN_BTN)
@@ -1946,6 +1994,7 @@ end
 -- a texture (not a child frame), and the tab buttons / close button are small, so
 -- they are left untouched.
 local function HideOtherAHFrames()
+    if AH.HideOthers then return AH.HideOthers() end
     if AuctionFrameBrowse then AuctionFrameBrowse:Hide() end
     if AuctionFrameBid then AuctionFrameBid:Hide() end
     if AuctionFrameAuctions then AuctionFrameAuctions:Hide() end
@@ -1971,7 +2020,7 @@ local function ShowCB()
     if #cheapItems > 0 and not cacheFromGetAll and statusFS then
         statusFS:SetText("List from a previous scan. After reopening the AH the snapshot is stale - run \"scan auc\" again to bid.")
     end
-    if myTabID then PanelTemplates_SetTab(AuctionFrame, myTabID) end
+    if myTabID and not AH.modern then PanelTemplates_SetTab(AuctionFrame, myTabID) end
     PollGetAllReady()                       -- light up "scan auc" green when GetAll is available
     -- re-hide next frame in case the default/other addon re-showed its panel after us
     C_Timer.After(0, function() if content and content:IsShown() then HideOtherAHFrames() end end)
@@ -1979,6 +2028,13 @@ end
 local function HideCB() if content then content:Hide() end end
 
 local function CreateTab()
+    if AH.CreateTab then                    -- WoW Forever: tab on the modern AuctionHouseFrame
+        if myTabID then return end
+        if not AH.Host() then C_Timer.After(0.2, CreateTab) return end   -- Blizzard AH UI still loading
+        BuildUI()
+        if content then myTabID = AH.CreateTab(content, ShowCB, HideCB) end
+        return
+    end
     if myTabID or not AuctionFrame then return end
     BuildUI()
     local index = (AuctionFrame.numTabs or 3) + 1
@@ -2000,7 +2056,8 @@ end
 ev:RegisterEvent("ADDON_LOADED")
 ev:RegisterEvent("AUCTION_HOUSE_SHOW")
 ev:RegisterEvent("AUCTION_HOUSE_CLOSED")
-ev:RegisterEvent("AUCTION_ITEM_LIST_UPDATE")
+pcall(ev.RegisterEvent, ev, "AUCTION_ITEM_LIST_UPDATE")
+for _, e in ipairs(AH.events or {}) do pcall(ev.RegisterEvent, ev, e) end   -- modern AH events
 pcall(ev.RegisterEvent, ev, "AUCTION_BIDDER_LIST_UPDATE")   -- Bids tab (guarded: name varies by client)
 pcall(ev.RegisterEvent, ev, "AUCTION_OWNED_LIST_UPDATE")    -- Auctions tab
 
@@ -2031,22 +2088,22 @@ ev:SetScript("OnEvent", function(_, event, arg1, arg2)
         end
     elseif event == "UI_ERROR_MESSAGE" then
         local msg = arg2 or arg1
-        if msg == AUC_ERR then
+        if msg == AUC_ERR or (AH.IsBidError and AH.IsBidError(msg)) then
             if viewMode == "bids" then RejectBidderBid()             -- my-bids re-bid rejected -> restore + flood-lock
             elseif #pending > 0 then RejectOldest() end              -- scan bid rejected (lot gone)
         end
-    elseif event == "AUCTION_ITEM_LIST_UPDATE" then
+    elseif event == "AUCTION_ITEM_LIST_UPDATE" or event == "REPLICATE_ITEM_LIST_UPDATE" then
         if scanMode == "getall" and getAllPending then
             getAllPending = false
-            local total = GetNumAuctionItems("list") or 0
+            local total = AH.Num("list") or 0
             SetProgress(0.1); statusFS:SetText("Received " .. total .. " lots, processing...")
             ProcessGetAll(1, total)
         elseif scanMode == "page" then PageScanUpdate()
         else
             if #pending > 0 then ReconcileBids() end          -- snapshot changed after a bid -> confirm
         end
-    elseif event == "AUCTION_BIDDER_LIST_UPDATE" or event == "AUCTION_OWNED_LIST_UPDATE" then
-        if event == "AUCTION_BIDDER_LIST_UPDATE" and viewMode == "bids" then
+    elseif event == "AUCTION_BIDDER_LIST_UPDATE" or event == "AUCTION_OWNED_LIST_UPDATE" or event == "BIDS_UPDATED" then
+        if event ~= "AUCTION_OWNED_LIST_UPDATE" and viewMode == "bids" then
             ReadMyBids(); UpdateTable()                              -- fresh bidder data -> redraw my-bids view
         end
         -- the default Bids/Auctions panel re-renders itself on these events; if OUR tab
@@ -2057,24 +2114,24 @@ end)
 
 -- diagnostic: log every PlaceAuctionBid (native or ours) so the default bid path
 -- can be compared with ours (enable with /cb debug)
-hooksecurefunc("PlaceAuctionBid", function(atype, index, bid)
+if PlaceAuctionBid then hooksecurefunc("PlaceAuctionBid", function(atype, index, bid)
     if not debugOn then return end
-    local nb, total = GetNumAuctionItems(atype)
-    local name = GetAuctionItemInfo(atype, index)
-    local link = GetAuctionItemLink(atype, index)
+    local nb, total = AH.Num(atype)
+    local name = AH.Info(atype, index)
+    local link = AH.Link(atype, index)
     print(string.format("|cff66ccff[CB debug]|r PlaceAuctionBid(%s, idx=%s, bid=%s) | listN=%s/%s | name=%s | link=%s",
         tostring(atype), tostring(index), tostring(bid), tostring(nb), tostring(total), tostring(name), tostring(link)))
-end)
+end) end
 
 -- diagnostic: catch ANYTHING (another addon or the default UI) that re-queries or
 -- re-sorts the live "list" AFTER our scan - that is what overwrites our GetAll
 -- snapshot and makes stored indices point at the wrong lot. The stack trace names
 -- the culprit. Our own scan queries are ignored (isScanning). Enable with /cb debug.
-hooksecurefunc("QueryAuctionItems", function()
+if QueryAuctionItems then hooksecurefunc("QueryAuctionItems", function()
     if not debugOn or isScanning then return end
     print("|cffff5555[CB QUERY]|r live auction list re-queried by:")
     print(debugstack(2, 6, 0))
-end)
+end) end
 if SortAuctionItems then
     hooksecurefunc("SortAuctionItems", function(listType, col)
         if not debugOn then return end
@@ -2124,14 +2181,14 @@ SlashCmdList["CHEAPBIDS"] = function(arg)
     end
     if arg == "bids" then
         -- dump the live "bidder" list so we can confirm the API + the leading/outbid field
-        pcall(GetBidderAuctionItems)
-        local n = (GetNumAuctionItems and GetNumAuctionItems("bidder")) or 0
+        pcall(AH.QueryBids)
+        local n = (AH.Num("bidder")) or 0
         print("|cffffcc00[CB bids]|r bidder count = " .. n .. " (if 0 but you have bids, run /cb bids again - it loads async)")
         for i = 1, math.min(n, 25) do
-            local name, _, cnt, _, _, _, _, mb, mi, buy, ba, high = GetAuctionItemInfo("bidder", i)
+            local name, _, cnt, _, _, _, _, mb, mi, buy, ba, high = AH.Info("bidder", i)
             print(string.format("|cffffcc00[CB bids]|r [%d] %s x%s | curBid=%s nextBid=%s buy=%s | %s | tl=%s",
                 i, tostring(name), tostring(cnt), tostring(ba), tostring(CalcBid(mb, mi, ba)),
-                tostring(buy), high and "LEADING" or "OUTBID", tostring(GetAuctionItemTimeLeft("bidder", i))))
+                tostring(buy), high and "LEADING" or "OUTBID", tostring(AH.TimeLeft("bidder", i))))
         end
         return
     end
@@ -2170,20 +2227,20 @@ SlashCmdList["CHEAPBIDS"] = function(arg)
         -- counts, nearest distance, and SAMPLES of this item's real lots.
         local it = selectedItem
         if not it then print("|cffff4444[CB find]|r select a lot in the table first.") return end
-        local n = GetNumAuctionItems("list") or 0
+        local n = AH.Num("list") or 0
         print(string.format("|cffffcc00[CB find]|r STORED id=%s '%s' cnt=%s buy=%s bid=%s idx=%s done=%s att=%s | liveN=%s cache=%s found=%s",
             tostring(it.itemID), tostring(it.name), tostring(it.cnt), tostring(it.buyout), tostring(it.bid),
             tostring(it.idx), tostring(it.done and 1 or 0), tostring(attempted[it] and 1 or 0),
             tostring(n), tostring(#scanCache), tostring(#cheapItems)))
         if it.idx then
-            local nm, _, c2, _, _, _, _, mb, mi, b2, ba, hi, _, _, _, _, id2 = GetAuctionItemInfo("list", it.idx)
+            local nm, _, c2, _, _, _, _, mb, mi, b2, ba, hi, _, _, _, _, id2 = AH.Info("list", it.idx)
             print(string.format("|cffffcc00[CB find]|r @idx %s: id=%s '%s' cnt=%s buy=%s bid=%s high=%s",
                 tostring(it.idx), tostring(id2), tostring(nm), tostring(c2), tostring(b2), tostring(CalcBid(mb, mi, ba)), tostring(hi)))
         end
         local biddable, highLed, sameAny, first, nearest = 0, 0, 0, nil, nil
         local samples = {}
         for i = 1, n do
-            local _, _, cnt, _, _, _, _, mb, mi, buy, ba, high, _, _, _, _, id = GetAuctionItemInfo("list", i)
+            local _, _, cnt, _, _, _, _, mb, mi, buy, ba, high, _, _, _, _, id = AH.Info("list", i)
             if id and id == it.itemID then
                 sameAny = sameAny + 1
                 local exact = (cnt or 1) == (it.cnt or 1) and (buy or 0) == (it.buyout or 0)
@@ -2226,7 +2283,7 @@ local function AucStackCount(tip, link)
     -- price x1, not the item's max stack. Only context-free tooltips (chat links,
     -- comparisons) fall back to the item's max stack size.
     if tip.cbStack and tip.cbStack >= 1 then return tip.cbStack end
-    local n = select(8, GetItemInfo(link))
+    local n = select(8, AH.ItemInfo(link))
     return (n and n > 1) and n or 1
 end
 -- Money text in Auctionator's exact visual format, so our row blends with its Vendor/
@@ -2339,6 +2396,12 @@ local function HookPriceTip(tip)
 end
 HookPriceTip(GameTooltip); HookPriceTip(ItemRefTooltip)
 HookPriceTip(ShoppingTooltip1); HookPriceTip(ShoppingTooltip2)
+-- modern client (WoW Forever): item tooltips such as the AH's own rows are built through
+-- TooltipDataProcessor, not the Set* methods above. Same PriceTip, de-duplicated by its flag;
+-- pcall because Midnight-era clients can hand addons restricted ("secret") values.
+if AH.modern and TooltipDataProcessor and Enum and Enum.TooltipDataType then
+    TooltipDataProcessor.AddTooltipPostCall(Enum.TooltipDataType.Item, function(tip) pcall(PriceTip, tip) end)
+end
 
 -- Tiny public surface for our plug-in modules (e.g. the Disenchant-price tooltip row):
 -- the LIVE per-unit market price (reads the same local priceDB the rest of this file
@@ -2419,6 +2482,9 @@ local function BuildOptionsPanel()
     end
 end
 pcall(BuildOptionsPanel)
+
+-- modern AH backend (WoW Forever): the lots it resolves in the background + redraw
+if AH.Bind then AH.Bind({ lots = function() return cheapItems end, redraw = function() UpdateTable() end }) end
 
 -- ===== Test hook =====
 -- No in-game effect: WoW never sets the CheapBidsTest global. The standalone test
