@@ -1,3 +1,11 @@
+# v2.2.0
+
+- `dis. loot` now subtracts the 5% auction house cut from the profit. Lots whose margin the cut eats are no longer listed, and buying them goes through the usual price protection.
+- Experimental WoW Forever support for the new auction house.
+- The CheapBids tab has a solid background, so other addons' panels no longer show through it.
+- The progress bar keeps moving while the server prepares the full scan.
+- New `/cb stats` command prints what the last scan contained.
+
 # v2.1.1
 
 - Auctionator can stay enabled while you bid, so the in-game reminders now only mention Auctioneer.

@@ -9,4 +9,3 @@
 
 Modern.lua
 CheapBids.lua
-Bindings.xml

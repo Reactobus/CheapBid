@@ -288,23 +288,36 @@ end
 local ownMode = false
 function M.HideOthers()
     local f = AuctionHouseFrame
-    if f and f.SetDisplayMode then
+    if not f then return end
+    if f.SetDisplayMode then
         ownMode = true; pcall(f.SetDisplayMode, f, {}); ownMode = false
     end
+    -- Panels of OTHER addons (e.g. Auctionator's tab) are not part of Blizzard's display modes:
+    -- hide every large visible child that is not one of the frame's own named parts or ours.
+    local own = {}
+    for _, v in pairs(f) do if type(v) == "table" then own[v] = true end end
+    for _, c in ipairs({ f:GetChildren() }) do
+        if not own[c] and c.IsShown and c:IsShown() and c ~= CheapBidsContent
+           and (c:GetWidth() or 0) > 300 and (c:GetHeight() or 0) > 300 then
+            local nm = c.GetName and c:GetName()
+            if not (nm and (nm:find("^AuctionHouseFrame") or nm:find("^CheapBids"))) then pcall(c.Hide, c) end
+        end
+    end
+    if f.SetTitle then pcall(f.SetTitle, f, "CheapBids") end
 end
 
 function M.CreateTab(content, onShow, onHide)
     local f = AuctionHouseFrame
     if not f then return nil end
     local tabs = f.Tabs or {}
+    local last = tabs[#tabs]          -- BEFORE creating ours: the tab template adds itself to f.Tabs
     local ok, tab = pcall(CreateFrame, "Button", "CheapBidsAHTab", f, "AuctionHouseFrameDisplayModeTabTemplate")
     if not ok or not tab then
         tab = CreateFrame("Button", "CheapBidsAHTab", f, "UIPanelButtonTemplate")
         tab:SetSize(96, 22)
     end
     tab:SetText("CheapBids")
-    local last = tabs[#tabs]
-    if last then tab:SetPoint("LEFT", last, "RIGHT", 3, 0)
+    if last and last ~= tab then tab:SetPoint("LEFT", last, "RIGHT", 3, 0)
     else tab:SetPoint("TOPLEFT", f, "BOTTOMLEFT", 20, 2) end
     if PanelTemplates_TabResize then pcall(PanelTemplates_TabResize, tab, 0) end
     local function Mark(selected)

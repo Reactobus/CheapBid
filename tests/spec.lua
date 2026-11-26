@@ -373,7 +373,7 @@ eq(ams[2].name, "unit1000x1", "aucmin sort: single pricier unit second")
 eq(ams[3].name, "nodata",     "aucmin sort: unpriced item sinks to the bottom")
 set("priceDB", {}); set("priceCount", {})
 
--- ===== Dis. loot + buy: buyout < reagent EV -> profitable; buy = bid mechanism at buyout =====
+-- ===== Dis. loot + buy: buyout < reagent EV minus the 5% cut -> profitable; buy = bid mechanism at buyout =====
 -- fake Disenchant-module bridge: 800 -> EV 50s, 801 -> EV 1s, 802 -> known not DE-able,
 -- 999 -> item info not cached yet (known=false, must NOT memoize a verdict)
 CheapBidsPublic.DisenchantValue = function(id)
@@ -381,9 +381,19 @@ CheapBidsPublic.DisenchantValue = function(id)
     local EV = { [800] = 5000, [801] = 100 }
     return EV[id], true
 end
-eq(fn.DisProfit({ itemID = 800, cnt = 1, buyout = 2000 }), 3000, "disprofit: EV 50s - buyout 20s = 30s")
-eq(fn.DisProfit({ itemID = 800, cnt = 2, buyout = 2000 }), 8000, "disprofit: EV scales with the stack")
-eq(fn.DisProfit({ itemID = 801, cnt = 1, buyout = 2000 }), -1900, "disprofit: negative when EV below buyout")
+eq(fn.DisProfit({ itemID = 800, cnt = 1, buyout = 2000 }), 2750, "disprofit: EV 50s - 5% cut - buyout 20s = 27s50c")
+eq(fn.DisProfit({ itemID = 800, cnt = 2, buyout = 2000 }), 7500, "disprofit: EV and cut scale with the stack")
+eq(fn.DisProfit({ itemID = 800, cnt = 1, buyout = 4750 }), 0, "disprofit: buyout = 95% of EV only breaks even")
+eq(fn.DisProfit({ itemID = 800, cnt = 1, buyout = 4900 }), -150, "disprofit: cheaper than EV but a loss after the cut")
+eq(fn.DisProfit({ itemID = 801, cnt = 1, buyout = 90 }), 5, "disprofit: EV 1s -> cut 5c")
+CheapBidsPublic.DisenchantValue = function() return 1019, true end
+eq(fn.DisProfit({ itemID = 803, cnt = 1, buyout = 900 }), 69, "disprofit: the cut rounds down (50.95c -> 50c)")
+CheapBidsPublic.DisenchantValue = function(id)
+    if id == 999 then return nil, false end
+    local EV = { [800] = 5000, [801] = 100 }
+    return EV[id], true
+end
+eq(fn.DisProfit({ itemID = 801, cnt = 1, buyout = 2000 }), -1905, "disprofit: negative when EV below buyout")
 eq(fn.DisProfit({ itemID = 802, cnt = 1, buyout = 100 }), nil, "disprofit: not disenchantable -> nil")
 eq(fn.DisProfit({ itemID = 800, cnt = 1, buyout = 0 }), nil, "disprofit: no buyout -> nil")
 local uncached = { itemID = 999, cnt = 1, buyout = 100 }
@@ -394,13 +404,15 @@ set("viewMode", "scan")
 set("filter", { bidMin = 1, bidMax = 99, buyMin = nil, buyMax = nil, quality = nil,
                 times = { [1] = true, [2] = true, [3] = true, [4] = true } })
 local win  = { name = "win",  itemID = 800, cnt = 1, bid = 10, buyout = 2000, timeLeft = 4 }
-local win2 = { name = "win2", itemID = 800, cnt = 1, bid = 10, buyout = 4900, timeLeft = 4 }
-local win3 = { name = "win3", itemID = 800, cnt = 2, bid = 10, buyout = 9000, timeLeft = 4 }  -- EV 2x5000, profit 10s
+local win2 = { name = "win2", itemID = 800, cnt = 1, bid = 10, buyout = 4700, timeLeft = 4 }  -- profit 50c
+local thin = { name = "thin", itemID = 800, cnt = 1, bid = 10, buyout = 4900, timeLeft = 4 }  -- the cut eats the margin
+local win3 = { name = "win3", itemID = 800, cnt = 2, bid = 10, buyout = 9000, timeLeft = 4 }  -- EV 2x5000, profit 5s
 set("scanCache", {
     win,
     { name = "lose", itemID = 801, cnt = 1, bid = 10, buyout = 2000, timeLeft = 4 },
     { name = "none", itemID = 802, cnt = 1, bid = 10, buyout = 100,  timeLeft = 4 },
     win2,
+    thin,
     win3,
     { name = "nobuy", itemID = 800, cnt = 1, bid = 10, buyout = 0,   timeLeft = 4 },
 })
@@ -422,9 +434,9 @@ ok(dl[2].name == "win" and dl[3].name == "win2", "disloot bid-column sort: equal
 set("sortKey", "aucmin"); set("sortAsc", false)
 fn.SortItems()
 dl = fn.ActiveList()
-eq(dl[1].name, "win",  "disloot profit-column sort: 30s profit on top")
-eq(dl[2].name, "win3", "disloot profit-column sort: 10s profit second")
-eq(dl[3].name, "win2", "disloot profit-column sort: 1s profit last")
+eq(dl[1].name, "win",  "disloot profit-column sort: 27s50c profit on top")
+eq(dl[2].name, "win3", "disloot profit-column sort: 5s profit second")
+eq(dl[3].name, "win2", "disloot profit-column sort: 50c profit last")
 
 -- regression: the confirm-time walk-down advance must use BUY logic in this view.
 -- A reagent-covered lot with a big BID used to be skipped by the bid-based IsBig,
@@ -433,7 +445,7 @@ set("priceProtect", true)
 set("priceDB", { [800] = 100 }); set("priceCount", { [800] = 5 })   -- market ceiling 70c: a 50s bid is "big"
 local hopA = { name = "hopA", itemID = 800, cnt = 1, bid = 10,   buyout = 2000, timeLeft = 4 }
 local hopB = { name = "hopB", itemID = 800, cnt = 1, bid = 5000, buyout = 2000, timeLeft = 4 }
-local hopC = { name = "hopC", itemID = 800, cnt = 1, bid = 10,   buyout = 4900, timeLeft = 4 }
+local hopC = { name = "hopC", itemID = 800, cnt = 1, bid = 10,   buyout = 4700, timeLeft = 4 }
 set("scanCache", { hopA, hopB, hopC })
 fn.ApplyDisLoot(true)
 eq(fn.ActiveList()[1].name, "hopA", "hop: profit order puts hopA first")
@@ -454,6 +466,26 @@ eq(#MOCK.popups, 0, "buy: profitable lot buys with no popup")
 eq(#MOCK.bids, 1, "buy: placed immediately")
 eq(MOCK.bids[1] and MOCK.bids[1].amount, 2000, "buy: amount = the lot's buyout")
 eq(MOCK.bids[1] and MOCK.bids[1].listType, "list", "buy: placed on the live list")
+
+-- the player-facing case: reagents 10g, buyout 9g70s. Looked like +30s before the cut was
+-- counted and was bought with no popup; it is a 20s loss, so the protection must ask
+CheapBidsPublic.DisenchantValue = function() return 100000, true end
+set("priceProtect", true); set("priceDB", {}); set("priceCount", {})
+local savedDB = CheapBidsDB
+CheapBidsDB = { protectFallback = 50000 }          -- no market price: ask above 5g
+MOCK.auctions.list = { { name = "thin", itemID = 804, cnt = 1, buyout = 97000, minBid = 10, minInc = 1, bidAmt = 0, high = false } }
+local thinBuy = { name = "thin", itemID = 804, cnt = 1, bid = 11, buyout = 97000, idx = 1, timeLeft = 4 }
+eq(fn.DisProfit(thinBuy), -2000, "buy: 10g reagents, 9g70s buyout = 20s loss")
+set("cheapItems", { thinBuy }); set("selectedItem", thinBuy)
+MOCK.bids = {}; MOCK.popups = {}; MOCK.gt = MOCK.gt + 5
+fn.BuyItem(thinBuy)
+eq(#MOCK.bids, 0, "buy: thin-margin lot is not bought without asking (no money spent)")
+eq(#MOCK.popups, 1, "buy: thin-margin lot goes through the normal price protection")
+CheapBidsDB = savedDB
+CheapBidsPublic.DisenchantValue = function(id)
+    local EV = { [800] = 5000, [801] = 100 }
+    return EV[id], true
+end
 
 -- an expensive lot with NO reagent cover asks for confirmation (protection ON)
 set("priceProtect", true); set("priceDB", {}); set("priceCount", {})

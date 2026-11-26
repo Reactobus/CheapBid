@@ -36,6 +36,7 @@ Other buttons:
 
 - `my bids` shows your bids, outbid lots first in red, so you can re-bid them.
 - `dis. loot` lists lots worth buying out and disenchanting (needs the Disenchant module).
+  `Dis. profit` is what is left after the 5% auction house cut and the buyout.
 
 Slash commands: `/cb` opens the tab, `/cbde` toggles the disenchant tooltip, `/cbpr` the
 prospecting tooltip, `/cbrowse` the compact Browse tab. A bid hotkey and all options are

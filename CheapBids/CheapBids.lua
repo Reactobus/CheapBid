@@ -298,13 +298,16 @@ local function DisValue(it)
     return v
 end
 
--- profit of "buy out + disenchant" for the whole lot: reagent EV x stack - buyout.
+-- profit of "buy out + disenchant" for the whole lot: reagent EV x stack, minus the 5%
+-- the faction auction house keeps from a successful sale (rounded down to a copper),
+-- minus the buyout. The deposit comes back on a sale, so it is not counted.
 -- nil when it cannot be judged (no buyout / no DE data yet / not disenchantable).
 local function DisProfit(it)
     if not it or not it.buyout or it.buyout <= 0 then return nil end
     local v = DisValue(it)
     if not v then return nil end
-    return v * (it.cnt or 1) - it.buyout
+    local gross = v * (it.cnt or 1)
+    return gross - math.floor(gross / 20) - it.buyout          -- 1/20 = the 5% auction cut
 end
 
 -- does a BUYOUT of this lot need the protection popup? A lot whose reagent EV covers
@@ -447,7 +450,7 @@ local function UpdateTable()
             row.sellerFS:SetText((it.owner and it.owner ~= "" and it.owner) or "?")
             row.buyFS:SetText(it.buyout > 0 and FormatMoney(it.buyout) or "-")
             if disLootView and not bidsView then
-                -- dis-loot view: this column is "Dis. profit" = reagent EV x stack - buyout
+                -- dis-loot view: this column is "Dis. profit" = reagent EV x stack - 5% cut - buyout
                 local p = DisProfit(it)
                 row.aucFS:SetText((p and p > 0) and FormatMoney(p) or "-")   -- FormatMoney can't render negatives
             else
@@ -531,7 +534,7 @@ local function ApplyDisLoot(auto)
     viewMode = "scan"
     disLootView = true
     -- Bid and Auc min are pointless here (we pay buyouts): Bid shows the reagent EV
-    -- ("Dis. price") and Auc min shows the net gain ("Dis. profit" = EV x stack - buyout)
+    -- ("Dis. price") and Auc min shows the net gain ("Dis. profit" = EV x stack - 5% - buyout)
     if headerBtns.bid and headerBtns.bid.label then headerBtns.bid.label:SetText("Dis. price") end
     if headerBtns.aucmin and headerBtns.aucmin.label then headerBtns.aucmin.label:SetText("Dis. profit") end
     if ResetColumnHiWater then ResetColumnHiWater() end
@@ -550,7 +553,7 @@ local function ApplyDisLoot(auto)
     if sb then sb:SetValue(0) end
     UpdateTable()
     if statusFS then statusFS:SetText(string.format(
-        "Dis. loot: %d profitable of %d (buyout < reagent value).", #cheapItems, #scanCache)) end
+        "Dis. loot: %d profitable of %d (after the 5% auction cut).", #cheapItems, #scanCache)) end
     if not auto then
         for _, delay in ipairs({ 0.5, 1.5, 3.0, 5.0 }) do
             C_Timer.After(delay, function()
@@ -715,7 +718,7 @@ local function ProcessGetAll(start, total)
     local stop = math.min(start + GETALL_BATCH - 1, total)
     for i = start, stop do ReadIndexInto(scanCache, i, true) end
     if stop < total then
-        SetProgress(0.1 + 0.9 * stop / total)
+        SetProgress(0.8 + 0.2 * stop / total)          -- the last 20% of the bar = processing
         statusFS:SetText(string.format("Processing %d/%d...", stop, total))
         C_Timer.After(0, function() ProcessGetAll(stop + 1, total) end)
     else
@@ -772,6 +775,20 @@ local function StartScan()
     scanMode = "getall"; isScanning = true; getAllPending = true
     UpdateButtons()
     SetProgress(0.05); statusFS:SetText("GetAll: downloading the whole auction house...")
+    -- The server sends nothing for a while (up to a couple of minutes), then everything at once.
+    -- So the bar creeps toward 80% while we wait (slower the longer it takes, tuned to how long
+    -- the last scan took) and the processing fills the rest. BTN doubles as the scan-state bag:
+    -- this chunk is at Lua 5.1's 200-local cap.
+    BTN.t0 = GetTime()
+    local tau = ((CheapBidsDB and CheapBidsDB.lastGetAllWait) or 90) / 2
+    local function Creep()
+        if myToken ~= scanToken or scanMode ~= "getall" or not getAllPending then return end
+        local t = GetTime() - BTN.t0
+        SetProgress(math.max(0.05, 0.8 * (1 - math.exp(-t / tau))))
+        statusFS:SetText(string.format("GetAll: downloading the whole auction house... %ds", math.floor(t)))
+        C_Timer.After(0.5, Creep)
+    end
+    C_Timer.After(0.5, Creep)
     AH.Query("", nil, nil, 0, nil, nil, true, false, nil)
     C_Timer.After(90, function()
         if myToken == scanToken and scanMode == "getall" and getAllPending then
@@ -1700,7 +1717,19 @@ local function BuildUI()
 
     content = CreateFrame("Frame", "CheapBidsContent", host)
     content:SetPoint("TOPLEFT", host, "TOPLEFT", 8, -22)
-    content:SetPoint("BOTTOMRIGHT", host, "BOTTOMRIGHT", -32, 28)
+    content:SetPoint("BOTTOMRIGHT", host, "BOTTOMRIGHT", AH.modern and -2 or -32, 28)   -- Forever: header backdrop reaches the frame edge
+    -- Forever's window is a little different: lift both panels off the gold display at the bottom
+    -- (+9px) and make the left column 6px wider toward the left edge. TBC keeps its layout.
+    local padB, padL, wideL, padR = 12, 15, 0, 8
+    if AH.modern then
+        padB, padL, wideL, padR = 31, 9, 6, 8
+        local lvl = host:GetFrameLevel()
+        if type(lvl) == "number" then content:SetFrameLevel(lvl + 10) end   -- above other addons' panels
+    end
+    -- opaque backdrop for the whole tab: another addon's tab (Auctionator...) must not show through
+    -- the semi-transparent filter row / left column when switching from its tab to ours
+    local cbg = content:CreateTexture(nil, "BACKGROUND")
+    cbg:SetAllPoints(); cbg:SetColorTexture(0.07, 0.07, 0.08, 1)
     content:Hide()
 
     -- filter (two rows)
@@ -1724,10 +1753,10 @@ local function BuildUI()
 
     -- left panel
     leftCol = CreateFrame("Frame", nil, content, bt)
-    leftCol:SetPoint("TOPLEFT", content, "TOPLEFT", 7, -76)       -- +5px off the AH frame border
-    leftCol:SetPoint("BOTTOMLEFT", host, "BOTTOMLEFT", 15, 12)  -- reach the frame's inner bottom (match rightPanel)
-    leftCol:SetWidth(170)                                          -- shrink so the right edge stays put
-    if leftCol.SetBackdrop then leftCol:SetBackdrop(PANEL_BACKDROP); leftCol:SetBackdropColor(0,0,0,0.55); leftCol:SetBackdropBorderColor(0.45,0.45,0.45) end
+    leftCol:SetPoint("TOPLEFT", content, "TOPLEFT", 7 - wideL, -76)       -- +5px off the AH frame border
+    leftCol:SetPoint("BOTTOMLEFT", host, "BOTTOMLEFT", padL, padB)  -- reach the frame's inner bottom (match rightPanel)
+    leftCol:SetWidth(170 + wideL)                                          -- shrink so the right edge stays put
+    if leftCol.SetBackdrop then leftCol:SetBackdrop(PANEL_BACKDROP); leftCol:SetBackdropColor(0.04,0.04,0.045,1); leftCol:SetBackdropBorderColor(0.45,0.45,0.45) end
 
     -- 6 buttons in a 3x2 grid:
     --   [ scan auc ] [ cancel    ]      (cancel aborts the scan -> next to scan)
@@ -1831,7 +1860,7 @@ local function BuildUI()
     -- right panel
     local rightPanel = CreateFrame("Frame", nil, content, bt)
     rightPanel:SetPoint("TOPLEFT", leftCol, "TOPRIGHT", 1, 0)         -- left edge 5px further left
-    rightPanel:SetPoint("BOTTOMRIGHT", host, "BOTTOMRIGHT", -8, 12)  -- stretch to the frame's bottom-right corner
+    rightPanel:SetPoint("BOTTOMRIGHT", host, "BOTTOMRIGHT", -padR, padB)  -- stretch to the frame's bottom-right corner
     if rightPanel.SetBackdrop then rightPanel:SetBackdrop(PANEL_BACKDROP); rightPanel:SetBackdropColor(0.045,0.05,0.07,1); rightPanel:SetBackdropBorderColor(0.45,0.45,0.45) end
 
     listFrame = CreateFrame("Frame", "CheapBidsList", rightPanel)
@@ -1844,7 +1873,7 @@ local function BuildUI()
     statusFS:SetPoint("TOPLEFT", mBidMax.last, "TOPRIGHT", 16, 3)
     statusFS:SetPoint("TOPRIGHT", content, "TOPRIGHT", -8, 3)
     statusFS:SetJustifyH("LEFT"); statusFS:SetWordWrap(true)
-    statusFS:SetText("Disable Auctioneer! scan auc -> filter -> search -> bid.")
+    statusFS:SetText(AH.modern and "scan auc -> filter -> search -> bid." or "Disable Auctioneer! scan auc -> filter -> search -> bid.")
 
     -- rarity filter: a Browse-tab-style dropdown directly UNDER the status line.
     -- Picking a rarity re-runs the filter automatically, exactly like the time
@@ -2067,7 +2096,7 @@ ev:SetScript("OnEvent", function(_, event, arg1, arg2)
         CheapBidsDB.myBids = nil           -- drop the removed "old bids" saved record
         priceDB = CheapBidsDB.priceDB or {}   -- Auc min price survives reloads until the next GetAll
         priceCount = CheapBidsDB.priceCount or {}
-        print("|cff00cc00[CheapBids]|r loaded. IMPORTANT: disable Auctioneer to bid.")
+        print("|cff00cc00[CheapBids]|r loaded." .. (AH.modern and "" or " IMPORTANT: disable Auctioneer to bid."))
     elseif event == "AUCTION_HOUSE_SHOW" then
         CreateTab()
         floodMode = false; floodAnchor = 0; prevErrAt = 0   -- fresh AH session -> exit flood mode
@@ -2096,7 +2125,8 @@ ev:SetScript("OnEvent", function(_, event, arg1, arg2)
         if scanMode == "getall" and getAllPending then
             getAllPending = false
             local total = AH.Num("list") or 0
-            SetProgress(0.1); statusFS:SetText("Received " .. total .. " lots, processing...")
+            if BTN.t0 and CheapBidsDB then CheapBidsDB.lastGetAllWait = math.max(10, math.min(300, GetTime() - BTN.t0)) end
+            SetProgress(0.8); statusFS:SetText("Received " .. total .. " lots, processing...")
             ProcessGetAll(1, total)
         elseif scanMode == "page" then PageScanUpdate()
         else
@@ -2196,6 +2226,32 @@ SlashCmdList["CHEAPBIDS"] = function(arg)
         -- analyze whether the EXISTING GetAll snapshot is ordered by real expiry
         -- (so a lot's idx could rank finer than the 4 time buckets). No rescan.
         TimeOrderDiag()
+        return
+    end
+    if arg == "stats" then
+        -- how are the scanned lots priced? (why a bid filter finds nothing; works on any client)
+        local n, noBuy, bid0, bidLow, bidEqBuy, bidBelow, stack, lowBuy = #scanCache, 0, 0, 0, 0, 0, 0, 0
+        local lows = {}
+        for _, it in ipairs(scanCache) do
+            local b, bo = it.bid or 0, it.buyout or 0
+            if bo == 0 then noBuy = noBuy + 1 end
+            if b == 0 then bid0 = bid0 + 1 end
+            if b >= 1 and b <= 99 then bidLow = bidLow + 1; if #lows < 8 then lows[#lows + 1] = it end end
+            if bo > 0 and b == bo then bidEqBuy = bidEqBuy + 1 elseif bo > 0 and b < bo then bidBelow = bidBelow + 1 end
+            if (it.cnt or 1) > 1 then stack = stack + 1 end
+        end
+        print(string.format("|cff00cc00[CheapBids]|r stats of %d scanned lots:", n))
+        print(string.format("  no buyout: %d | bid = 0: %d | bid 1-99c: %d | stacks (qty>1): %d", noBuy, bid0, bidLow, stack))
+        print(string.format("  with buyout: bid = buyout: %d | bid < buyout: %d", bidEqBuy, bidBelow))
+        for _, it in ipairs(lows) do
+            print(string.format("  low bid: %s x%d bid %s buyout %s", tostring(it.name), it.cnt or 1,
+                FormatMoney(it.bid or 0), FormatMoney(it.buyout or 0)))
+        end
+        for i = 1, math.min(3, n) do
+            local it = scanCache[i]
+            print(string.format("  sample %d: %s x%d bid %s buyout %s", i, tostring(it.name), it.cnt or 1,
+                FormatMoney(it.bid or 0), FormatMoney(it.buyout or 0)))
+        end
         return
     end
     if arg == "debug" then
