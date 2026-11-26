@@ -1,7 +1,7 @@
 # CheapBids
 
 An auction house addon for World of Warcraft **TBC Classic Anniversary 2.5.6** and
-**WoW Forever** (experimental, `forever` branch).
+**WoW Forever** (experimental).
 
 It scans the whole auction house, lists the cheapest bids (1-99 copper by default),
 and lets you bid or buy out from a fast sortable table. Every bid and buyout is a

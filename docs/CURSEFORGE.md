@@ -19,11 +19,15 @@
 
 ## Автоматические релизы
 
-1. В `CheapBids/CheapBids.toc` добавить строку `## X-Curse-Project-ID: 1780581`.
+1. Project ID (`## X-Curse-Project-ID: 1780581`) уже прописан в обоих `.toc` главного аддона.
 2. Создать токен на [странице API tokens](https://authors.curseforge.com/#/settings/api-tokens) и
    сохранить его в GitHub: Settings -> Secrets and variables -> Actions -> `CF_API_TOKEN`.
 3. Для релиза дописать `CHANGELOG.md`, закоммитить и запушить тег:
-   `git tag v2.1.2 && git push origin main v2.1.2`.
+   `git tag v2.2.1 && git push origin main v2.2.1`.
+4. Без секрета `CF_API_TOKEN` создаётся только релиз на GitHub (на странице запуска будет
+   предупреждение). Добавить секрет и нажать Re-run all jobs, тогда уйдёт и на CurseForge.
+
+Сборщик сам берёт обе версии игры из `.toc`: 2.5.6 и Forever 1.60.1 (`_Camelot.toc`).
 
 После патча игры обновить `## Interface:` во всех четырёх `.toc`, иначе аддон станет устаревшим.
 
@@ -61,6 +65,10 @@ Now and then someone lists an item with a 1 copper starting bid and nobody notic
 You place every bid and buyout yourself, one click at a time. It's not a bot and it won't buy anything on its own.
 
 ![The CheapBids tab in the auction house](https://media.forgecdn.net/attachments/2140/174/curseforge-screenshot-png.png)
+
+## WoW Forever (experimental)
+
+The same download works on WoW Forever, which has the new auction house. Only items with a bid can be bid on: sellers there often list for buyout only. After a scan CheapBids looks up each cheap lot on the server in the background, so a lot it hasn't found yet needs a second click.
 
 ## What it does
 

@@ -4,6 +4,7 @@
 ## Author: Reactobus
 ## Version: @project-version@
 ## X-License: GPL-2.0-or-later
+## X-Curse-Project-ID: 1780581
 ## X-Website: https://github.com/Reactobus/CheapBid
 ## SavedVariables: CheapBidsDB
 

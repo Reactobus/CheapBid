@@ -1,10 +1,10 @@
 # CheapBids — гид по проекту (для Claude Code)
 
-Аддон для **WoW TBC Classic 2.5.6** (юбилейный клиент `_anniversary_`) и, в ветке `forever`,
-для **WoW Forever** (`_forever_`, интерфейс 16001). Сканирует весь аукцион (GetAll), показывает
+Аддон для **WoW TBC Classic 2.5.6** (юбилейный клиент `_anniversary_`) и для
+**WoW Forever** (`_forever_`, интерфейс 16001). Сканирует весь аукцион (GetAll), показывает
 лоты со **ставкой 1–99 медью**, и даёт ставить по ним **вручную** (игрок жмёт кнопку/строку — это НЕ бот).
 
-## WoW Forever (ветка `forever`)
+## WoW Forever (в `main` с v2.2.0)
 
 - **Клиент:** `wowf 1.60.1`, `WOW_PROJECT_CAMELOT`, интерфейс **16001**. Это клиент семейства
   Mainline (код Midnight 12.x) с **новым аукционом `C_AuctionHouse`** и ограничениями Midnight
